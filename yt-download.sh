@@ -44,8 +44,15 @@ case "$OS" in
         die "Unsupported OS: $OS" ;;
 esac
 
-# Resolve install directory: prefer a dir already on PATH, otherwise ~/.local/bin
-if command -v yt-dlp &>/dev/null; then
+# Resolve yt-dlp binary: bundled copy first, then PATH, then download to ~/.local/bin
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FFMPEG_BIN=""
+
+if [[ -f "${SCRIPT_DIR}/${BINARY}" ]]; then
+    # Bundled — ensure executable bit is set (zip does not preserve permissions)
+    chmod +x "${SCRIPT_DIR}/${BINARY}"
+    YTDLP_BIN="${SCRIPT_DIR}/${BINARY}"
+elif command -v yt-dlp &>/dev/null; then
     YTDLP_BIN="$(command -v yt-dlp)"
 else
     INSTALL_DIR="${HOME}/.local/bin"
@@ -53,10 +60,35 @@ else
     YTDLP_BIN="${INSTALL_DIR}/${BINARY}"
 fi
 
-# -- 2. Parse arguments --
+# Resolve ffmpeg: bundled copy first, then leave empty (yt-dlp will search PATH)
+case "$OS" in
+    MINGW*|MSYS*|CYGWIN*) FFMPEG_LOCAL="ffmpeg.exe" ;;
+    *)                     FFMPEG_LOCAL="ffmpeg" ;;
+esac
+
+if [[ -f "${SCRIPT_DIR}/${FFMPEG_LOCAL}" ]]; then
+    chmod +x "${SCRIPT_DIR}/${FFMPEG_LOCAL}"
+    FFMPEG_BIN="${SCRIPT_DIR}/${FFMPEG_LOCAL}"
+fi
+
+# On Cygwin/MSYS/MINGW, yt-dlp.exe is a native Windows binary so it needs
+# Windows-style paths (C:\...) for its own arguments (e.g. --ffmpeg-location).
+# However YTDLP_BIN itself must stay as a Unix path so bash can execute it.
+SCRIPT_DIR_WIN=""
+if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && command -v cygpath &>/dev/null; then
+    SCRIPT_DIR_WIN="$(cygpath -w "$SCRIPT_DIR")"
+    # FFMPEG_BIN is passed as an argument to yt-dlp.exe, so it needs a Windows path
+    [[ -n "$FFMPEG_BIN" ]] && FFMPEG_BIN="${SCRIPT_DIR_WIN}\\${FFMPEG_LOCAL}"
+    # YTDLP_BIN stays as a Unix/Cygwin path — bash needs it that way to execute it
+fi
+
+# ─────────────────────────────────────────────
+# 2. Parse arguments  (order-independent flags)
+# ─────────────────────────────────────────────
 FORCE_YES=false
 DO_UPDATE=false
 AUDIO_ONLY=false
+JELLYFIN=false
 OUTPUT_DIR=""
 BASE_URL=""
 
@@ -67,6 +99,8 @@ Usage: $(basename "$0") [options] <URL>
 Options:
   -y, --yes          Automatically download full playlists without asking
   -u, --update       Update yt-dlp to the latest release before running
+  -a, --audio        Download audio only, as MP3
+  -j, --jellyfin     Jellyfin-compatible filenames and save info.json sidecar
   -o, --output DIR   Save files into DIR  (default: current directory)
   -h, --help         Show this help
 
@@ -83,6 +117,7 @@ while [[ $# -gt 0 ]]; do
         -y|--yes)    FORCE_YES=true;  shift ;;
         -u|--update) DO_UPDATE=true;  shift ;;
         -a|--audio)  AUDIO_ONLY=true; shift ;;
+        -j|--jellyfin) JELLYFIN=true; shift ;;
         -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
         -h|--help)   usage 0 ;;
         -*)          echo "Unknown option: $1" >&2; usage 1 ;;
@@ -102,8 +137,12 @@ if [[ ! -x "$YTDLP_BIN" ]]; then
 fi
 
 if [[ "$DO_UPDATE" == true ]]; then
-    info "Updating yt-dlp…"
-    "$YTDLP_BIN" -U
+    info "Updating yt-dlp at $YTDLP_BIN…"
+    if [[ -w "$YTDLP_BIN" ]]; then
+        "$YTDLP_BIN" -U
+    else
+        die "Cannot update: $YTDLP_BIN is not writable. Try running with sudo, or update the bundle manually."
+    fi
 fi
 
 # -- 4. Resolve output directory --
@@ -172,17 +211,36 @@ rm -f "$stderr_tmp"
 
 # -- 6. Confirm to proceed if more than one URL --
 
+# read_tty: prompt the user reliably after a process substitution.
+# - /dev/tty works on macOS, Linux, and Cygwin
+# - Git Bash (MINGW) has no /dev/tty — reopen stdin from the console explicitly
+read_tty() {   # read_tty <var> <prompt>
+    local __var="$1" __prompt="$2" __val
+    if [[ -e /dev/tty ]]; then
+        read -rp "$__prompt" __val </dev/tty
+    elif [[ -e /dev/con ]]; then
+        # Git Bash / MINGW: /dev/con is the Windows console device
+        read -rp "$__prompt" __val </dev/con
+    else
+        # Last resort: reopen fd 0 from the controlling terminal
+        exec 3<>/dev/stdin
+        read -rp "$__prompt" __val <&3
+        exec 3>&-
+    fi
+    printf -v "$__var" "%s" "$__val"
+}
+
 proceed=""
 if [[ "$FORCE_YES" == true || ${#urls[@]} -eq 1 ]]; then
-	echo "Found ${#urls[@]} urls."
-	proceed="y"
+    echo "Found ${#urls[@]} url(s)."
+    proceed="y"
 else
-	read -rp "Found ${#urls[@]} urls. Proceed? (y/n): " proceed
+    read_tty proceed "Found ${#urls[@]} urls. Proceed? (y/n): "
 fi
 
 if [[ ! "$proceed" =~ ^[yY]$ ]]; then
-	echo "Bye"
-	exit 0
+    echo "Bye"
+    exit 0
 fi
 
 
@@ -207,6 +265,64 @@ else
     )
 fi
 
+# Pass bundled ffmpeg location to yt-dlp if we found one.
+# FFMPEG_BIN is already a Windows path on Cygwin/MSYS/MINGW (converted above).
+if [[ -n "$FFMPEG_BIN" ]]; then
+    if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
+        # Use the already-converted Windows path directly
+        BASE_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
+    else
+        BASE_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
+    fi
+fi
+
+# On Windows, guard against the 260-character MAX_PATH limit.
+# Read LongPathsEnabled from the registry; only trim if it is not set.
+if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
+    # || true prevents set -e from killing the script if reg query or grep returns non-zero
+    LONG_PATHS_ENABLED="$(reg query \
+        "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" \
+        /v LongPathsEnabled 2>/dev/null \
+        | grep -i "LongPathsEnabled" \
+        | awk '{print $NF}' || true)"
+    if [[ "$LONG_PATHS_ENABLED" != "0x1" ]]; then
+        info "Windows long path support not enabled — trimming filenames to 120 chars"
+        info "To enable, run as Administrator:"
+        info 'reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f'
+        # 200 chars keeps the [VideoID] intact in Jellyfin filenames
+        # while still safely under the 260-char MAX_PATH with typical base paths
+        BASE_OPTS+=("--trim-filenames" "200")
+    fi
+fi
+
+# If a supported JS runtime is available, let yt-dlp use its full default client
+# list (which includes JS-dependent clients for best quality).
+# If not, restrict to clients that work without one to suppress the warning.
+# Supported runtimes: deno (recommended), nodejs, phantomjs
+if command -v deno &>/dev/null || command -v node &>/dev/null || command -v phantomjs &>/dev/null; then
+    info "JS runtime found ($(command -v deno &>/dev/null && echo deno || command -v node &>/dev/null && echo node || echo phantomjs)) — using default yt-dlp clients"
+else
+    info "No JS runtime found — using tv_embedded,ios,web clients (install deno for best quality)"
+    BASE_OPTS+=("--extractor-args" "youtube:player_client=tv_embedded,ios,web")
+fi
+
+# Jellyfin-compatible output template:
+# Channel - YYYYMMDD - Title [VideoID].ext
+# info.json and thumbnail share the same base name so Jellyfin can match them.
+if [[ "$JELLYFIN" == true ]]; then
+    JELLYFIN_TEMPLATE="%(channel)s - %(upload_date)s - %(title)s [%(id)s].%(ext)s"
+    JELLYFIN_PLAYLIST_TEMPLATE="%(playlist_title)s/%(channel)s - %(upload_date)s - %(title)s [%(id)s].%(ext)s"
+    BASE_OPTS+=(
+        "--write-info-json"
+        "--write-thumbnail"
+        "--convert-thumbnails" "jpg"
+        "--no-write-playlist-metafiles"  # skip playlist-level info.json/thumbnail (has NA date)
+    )
+fi
+
+# Avoid .part files — write directly to final filename
+BASE_OPTS+=("--no-part")
+
 for url in "${urls[@]}"; do
     OPTS=("${BASE_OPTS[@]}")
     confirm=""
@@ -218,27 +334,42 @@ for url in "${urls[@]}"; do
         else
             echo
             echo "Detected a video+playlist URL: $url"
-            read -rp "Download the WHOLE playlist? (y/n): " confirm
+            read_tty confirm "Download the WHOLE playlist? (y/n): "
         fi
 
         if [[ "$confirm" =~ ^[yY]$ ]]; then
             OPTS+=("--yes-playlist")
-            OUT_TEMPLATE="${OUT_PREFIX}%(playlist_title)s/%(playlist_index)03d-%(title)s.%(ext)s"
+            if [[ "$JELLYFIN" == true ]]; then
+                OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_PLAYLIST_TEMPLATE}"
+            else
+                OUT_TEMPLATE="${OUT_PREFIX}%(playlist_title)s/%(playlist_index)03d-%(title)s.%(ext)s"
+            fi
         else
             OPTS+=("--no-playlist")
-            OUT_TEMPLATE="${OUT_PREFIX}%(title)s.%(ext)s"
+            if [[ "$JELLYFIN" == true ]]; then
+                OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_TEMPLATE}"
+            else
+                OUT_TEMPLATE="${OUT_PREFIX}%(title)s.%(ext)s"
+            fi
         fi
 
     elif [[ "$url" == *"list="* ]]; then
         OPTS+=("--yes-playlist")
-        OUT_TEMPLATE="${OUT_PREFIX}%(playlist_title)s/%(playlist_index)03d-%(title)s.%(ext)s"
+        if [[ "$JELLYFIN" == true ]]; then
+            OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_PLAYLIST_TEMPLATE}"
+        else
+            OUT_TEMPLATE="${OUT_PREFIX}%(playlist_title)s/%(playlist_index)03d-%(title)s.%(ext)s"
+        fi
 
     else
         OPTS+=("--no-playlist")
-        OUT_TEMPLATE="${OUT_PREFIX}%(title)s.%(ext)s"
+        if [[ "$JELLYFIN" == true ]]; then
+            OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_TEMPLATE}"
+        else
+            OUT_TEMPLATE="${OUT_PREFIX}%(title)s.%(ext)s"
+        fi
     fi
 
     info "Processing: $url"
     "$YTDLP_BIN" "${OPTS[@]}" -o "$OUT_TEMPLATE" "$url"
 done
-
