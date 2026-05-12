@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # filenames-sanitise.sh -- Recursively sanitise filenames and folder names
+#
+# Version:   2026-05-13
+# License:   MIT <https://spdx.org/licenses/MIT.html>
+# Copyright: 2026 Axel Busch
+#
 # Applies the same rules as yt-download.sh:
 #   - Replace characters forbidden on NTFS/exFAT/APFS/ext4: \ : * ? " < > |
 #   - Trim trailing dots or spaces (NTFS rejects these)
-# Deliberately does NOT replace spaces or force lowercase.
+# Does NOT replace spaces or force lowercase.
+
+set -euo pipefail
 
 # --- Helpers ---
+
 die()  { echo "Error: $*" >&2; exit 1; }
 info() { echo "--- $* ---"; }
 

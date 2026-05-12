@@ -1,5 +1,65 @@
 #!/usr/bin/env bash
-# yt-download.sh  -  Download YouTube videos / music / playlists
+# yt-download.sh -- Download YouTube videos, playlists, and channels
+#
+# Version:   2026-05-13
+# License:   MIT <https://spdx.org/licenses/MIT.html>
+# Copyright: 2026 Axel Busch
+#
+# DESCRIPTION
+#   Downloads YouTube content using yt-dlp. Handles single videos, playlists,
+#   and entire channel libraries. Automatically downloads and manages yt-dlp,
+#   ffmpeg, and deno if bundled versions are present in the same directory.
+#
+# USAGE
+#   ./yt-download.sh [options] <URL>
+#
+# OPTIONS
+#   -y, --yes          Download full playlists without prompting
+#   -u, --update       Update yt-dlp and deno before running (URL optional)
+#   -a, --audio        Download audio only as MP3
+#   -j, --jellyfin     Jellyfin-compatible filenames with info.json and
+#                      thumbnail sidecars (requires ffmpeg)
+#   -o, --output DIR   Save files into DIR (default: current directory,
+#                      or channel name for channel URLs)
+#   -h, --help         Show usage
+#
+# EXAMPLES
+#   ./yt-download.sh "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+#   ./yt-download.sh --yes "https://www.youtube.com/@BedtimeHistory/playlists"
+#   ./yt-download.sh --jellyfin --yes "https://www.youtube.com/playlist?list=PLxxx"
+#   ./yt-download.sh -a -y "https://www.youtube.com/playlist?list=PLxxx"
+#   ./yt-download.sh -u
+#
+# OUTPUT STRUCTURE
+#   Single video:           Video Title.mp4
+#   Playlist:               Playlist Title/001-Video Title.mp4
+#   Channel (no -o):        ChannelName/Playlist Title/001-Video Title.mp4
+#   Jellyfin single:        Channel - 20231015 - Video Title [VideoID].mp4
+#   Jellyfin playlist:      Playlist Title/Channel - 20231015 - Title [ID].mp4
+#   Audio:                  Video Title.mp3
+#
+# DEPENDENCIES
+#   Required:  bash, curl or wget (for initial yt-dlp download only)
+#   Bundled:   yt-dlp, ffmpeg, deno (included in release bundles)
+#   Optional:  deno or node (for best YouTube format support; auto-detected)
+#
+# PLATFORMS
+#   macOS, Linux, Windows (Git Bash, Cygwin)
+#
+# NOTES
+#   - On Windows, checks the registry for LongPathsEnabled and trims filenames
+#     to 200 chars if not set. In order to enable long paths, run the following
+#     with Administrator rights:
+#         reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+#   - Jellyfin mode requires ffmpeg for thumbnail conversion and format merging.
+#     https://github.com/ankenyr/jellyfin-youtube-metadata-plugin
+#   - yt-dlp is downloaded automatically to ~/.local/bin if not bundled or on PATH.
+#
+# SEE ALSO
+#   build-release.sh         -- builds platform bundles with all dependencies
+#   filenames-sanitise.sh    -- sanitises filenames recursively for cross-platform use
+#   filenames-dejellyfin.sh  -- converts Jellyfin-style filenames to normal style
+# =============================================================================
 
 # --- 0. Helpers ---
 set -euo pipefail
@@ -208,33 +268,41 @@ else
 fi
 
 # -- 5. Fetch playlist list --
-# Turns channel page into list of playlist URLs
+# For channel pages, expand into individual playlist URLs.
+# For direct playlist or video URLs, use as-is -- the flat-playlist
+# expansion would incorrectly treat video IDs as playlist IDs.
 info "Fetching content from $BASE_URL"
 
 urls=()
-stderr_tmp="$(mktemp)"
 
-while IFS= read -r line; do
-    [[ -n "$line" ]] && urls+=("$line")
-done < <(
-    "$YTDLP_BIN" \
-        --flat-playlist \
-        --print "https://www.youtube.com/playlist?list=%(id)s" \
-        "$BASE_URL" 2>"$stderr_tmp"
-)
-
-# If nothing came back, check whether it was a real error or just a single video
-if [[ ${#urls[@]} -eq 0 ]]; then
-    if grep -qi "error\|failed\|unable" "$stderr_tmp" 2>/dev/null; then
-        cat "$stderr_tmp" >&2
-        rm -f "$stderr_tmp"
-        die "yt-dlp reported an error while fetching '$BASE_URL'. Check the URL and your connection."
-    fi
-    # Likely a single video or direct playlist URL -- proceed with the input as-is
+if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
+      "$BASE_URL" == *"youtube.com/watch?"* || \
+      "$BASE_URL" == *"youtu.be/"* ]]; then
+    # Direct playlist or video URL -- use as-is, no expansion needed
     urls=("$BASE_URL")
-fi
+else
+    # Channel or other page -- expand into list of playlist URLs
+    stderr_tmp="$(mktemp)"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && urls+=("$line")
+    done < <(
+        "$YTDLP_BIN" \
+            --flat-playlist \
+            --print "https://www.youtube.com/playlist?list=%(id)s" \
+            "$BASE_URL" 2>"$stderr_tmp"
+    )
 
-rm -f "$stderr_tmp"
+    if [[ ${#urls[@]} -eq 0 ]]; then
+        if grep -qi "error\|failed\|unable" "$stderr_tmp" 2>/dev/null; then
+            cat "$stderr_tmp" >&2
+            rm -f "$stderr_tmp"
+            die "yt-dlp reported an error while fetching '$BASE_URL'. Check the URL and your connection."
+        fi
+        # Nothing found -- fall back to using the URL directly
+        urls=("$BASE_URL")
+    fi
+    rm -f "$stderr_tmp"
+fi
 
 [[ ${#urls[@]} -eq 0 || -z "${urls[0]}" ]] && die "No valid URLs found for '$BASE_URL'."
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # filenames-dejellyfin.sh -- Convert Jellyfin-style filenames back to normal playlist style.
+#
+# Version:   2026-05-13
+# License:   MIT <https://spdx.org/licenses/MIT.html>
+# Copyright: 2026 Axel Busch
 #
 # Jellyfin style:  Channel - 20231015 - Some Video Title [VideoID].mp4
 # Normal style:    001-Some Video Title.mp4
@@ -11,7 +13,10 @@ set -euo pipefail
 # Does not change folder structure.
 # Requires python
 
+set -euo pipefail
+
 # --- Helpers ---
+
 die()  { echo "Error: $*" >&2; exit 1; }
 info() { echo "--- $* ---"; }
 
