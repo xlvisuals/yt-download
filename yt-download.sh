@@ -47,10 +47,10 @@
 #   macOS, Linux, Windows (Git Bash, Cygwin)
 #
 # NOTES
-#   - On Windows, checks the registry for LongPathsEnabled and trims filenames
-#     to 200 chars if not set. In order to enable long paths, run the following
-#     with Administrator rights:
+#   - On Windows, tests for LongPathsEnabled and trims filenames to 200 chars if not
+#     set. In order to enable long paths, run the following with Administrator rights:
 #         reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+#     and reboot.
 #   - Jellyfin mode requires ffmpeg for thumbnail conversion and format merging.
 #     https://github.com/ankenyr/jellyfin-youtube-metadata-plugin
 #   - yt-dlp is downloaded automatically to ~/.local/bin if not bundled or on PATH.
@@ -69,6 +69,21 @@ info() { echo "--- $* ---"; }
 
 need_cmd() {
     command -v "$1" &>/dev/null || die "'$1' is required but not found. Please install it."
+}
+
+# Check available disk space on the given path (in MB)
+check_disk_space() {  # check_disk_space <path> <min_mb>
+    local path="$1" min_mb="$2"
+    # df -Pm: POSIX portable, output in MB; works on macOS, Linux, Git Bash, Cygwin
+    local avail_mb device
+    avail_mb="$(df -Pm "$path" 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [[ -z "$avail_mb" ]]; then
+        die "Could not check disk space on '$path' -- is the path accessible?"
+    fi
+    if [[ "$avail_mb" -lt "$min_mb" ]]; then
+        device="$(df -Pm "$path" 2>/dev/null | awk 'NR==2 {print $1}')"
+        die "Disk full on ${device} -- ${avail_mb}MB available, ${min_mb}MB required. Aborting."
+    fi
 }
 
 # Download with curl (preferred) or wget fallback
@@ -374,17 +389,23 @@ if [[ -n "$FFMPEG_BIN" ]]; then
     fi
 fi
 
-# On Windows, guard against the 260-character MAX_PATH limit.
-# Read LongPathsEnabled from the registry; only trim if it is not set.
+# On Windows, test whether long path support is active by actually trying to
+# create a file with a path longer than 260 characters. This is more reliable
+# than reading the registry, which may not reflect reality until after a reboot.
 if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
-    # || true prevents set -e from killing the script if reg query or grep returns non-zero
-    LONG_PATHS_ENABLED="$(reg query \
-        "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" \
-        /v LongPathsEnabled 2>/dev/null \
-        | grep -i "LongPathsEnabled" \
-        | awk '{print $NF}' || true)"
-    if [[ "$LONG_PATHS_ENABLED" != "0x1" ]]; then
-        info "Windows long path support not enabled -- trimming filenames to 120 chars"
+    LONG_PATH_OK=false
+    test_dir="$(mktemp -d 2>/dev/null || echo "")"
+    if [[ -n "$test_dir" ]]; then
+        # Build a filename that exceeds 260 chars on its own
+        long_name="$(printf '%0.s x' {1..140} | tr -d ' ')"
+        if touch "${test_dir}/${long_name}" 2>/dev/null; then
+            LONG_PATH_OK=true
+            rm -f "${test_dir}/${long_name}"
+        fi
+        rmdir "$test_dir" 2>/dev/null || true
+    fi
+    if [[ "$LONG_PATH_OK" == false ]]; then
+        info "Windows long path support not enabled -- trimming filenames to 200 chars"
         info "To enable, run as Administrator:"
         info 'reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f'
         # 200 chars keeps the [VideoID] intact in Jellyfin filenames
@@ -470,6 +491,12 @@ for url in "${urls[@]}"; do
             OUT_TEMPLATE="${OUT_PREFIX}%(title)s.%(ext)s"
         fi
     fi
+
+    # Check disk space on the output location before starting each download
+    check_dir="${OUT_PREFIX:-.}"
+    check_dir="${check_dir%/}"   # strip trailing slash
+    [[ -z "$check_dir" ]] && check_dir="."
+    check_disk_space "$check_dir" 100
 
     info "Processing: $url"
     "$YTDLP_BIN" "${OPTS[@]}" -o "$OUT_TEMPLATE" "$url"
