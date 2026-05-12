@@ -8,19 +8,36 @@ A bash script to download YouTube videos, playlists, and entire channels — wit
 - Automatically downloads and manages [yt-dlp](https://github.com/yt-dlp/yt-dlp) — no manual setup needed
 - Embeds English subtitles as `.srt` into the video file
 - Best available MP4 quality, with audio
+- Audio-only MP3 download mode
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
 - Channel downloads are automatically organised into a named folder
-- Works on macOS, Linux, and Windows (Git Bash)
+- Jellyfin-compatible download mode with `info.json` and thumbnail sidecars
+- Bundles include ffmpeg and deno — no separate installs needed on macOS and Windows
+- Works on macOS, Linux, Windows (Git Bash and Cygwin)
 
 ## Requirements
 
 - **bash** (macOS/Linux: built-in; Windows: [Git for Windows](https://git-scm.com/download/win))
-- **curl** or **wget** to download yt-dlp on first run
+- **curl** or **wget** to download yt-dlp on first run (only needed if not using a bundle)
   - macOS: `curl` is always present
   - Linux: one or both are usually present; if not: `sudo apt install curl`
   - Windows/Git Bash: `curl` ships with Windows 10 1803+ and is available in Git Bash
 
-yt-dlp itself is downloaded automatically on first run to `~/.local/bin/`.
+## Bundles vs Standalone
+
+**Bundles** (recommended for most users) are available on the [releases page](../../releases) and include everything needed:
+
+| Bundle | Includes |
+|--------|----------|
+| `yt-download_macos_x64.tar.gz` | yt-dlp, ffmpeg, deno |
+| `yt-download_macos_aarch64.tar.gz` | yt-dlp, ffmpeg, deno (Apple Silicon) |
+| `yt-download_linux_x64.tar.gz` | yt-dlp, ffmpeg, deno |
+| `yt-download_linux_aarch64.tar.gz` | yt-dlp, ffmpeg, deno |
+| `yt-download_windows.zip` | yt-dlp, ffmpeg, deno |
+
+Extract the archive for your platform and run `yt-download.sh` from the extracted folder. No other setup required.
+
+**Standalone** (`yt-download.sh` on its own): yt-dlp is downloaded automatically on first run to `~/.local/bin/`. ffmpeg and deno must be installed separately (see below).
 
 ## Usage
 
@@ -33,7 +50,7 @@ yt-dlp itself is downloaded automatically on first run to `~/.local/bin/`.
 | Flag | Description |
 |------|-------------|
 | `-y`, `--yes` | Download full playlists without prompting |
-| `-u`, `--update` | Update yt-dlp to the latest release before running |
+| `-u`, `--update` | Update yt-dlp and deno to their latest releases before running |
 | `-a`, `--audio` | Download audio only as MP3 (no video, no subtitles) |
 | `-j`, `--jellyfin` | Jellyfin-compatible filenames + save `info.json` and thumbnail sidecar |
 | `-o`, `--output DIR` | Save files into `DIR` (default: current directory, or channel name for channel URLs) |
@@ -81,7 +98,7 @@ yt-dlp itself is downloaded automatically on first run to `~/.local/bin/`.
 ./yt-download.sh --jellyfin --yes "https://www.youtube.com/@BedtimeHistory/playlists"
 ```
 
-**Update yt-dlp then download:**
+**Update yt-dlp and deno, then download:**
 ```bash
 ./yt-download.sh --update "https://www.youtube.com/@BedtimeHistory/playlists"
 ```
@@ -98,20 +115,6 @@ yt-dlp itself is downloaded automatically on first run to `~/.local/bin/`.
 | Playlist with `-a` | `Playlist Title/001-Video Title.mp3` |
 | Single video with `-j` | `Channel - 20211023 - Video Title [VideoID].mp4` |
 | Playlist with `-j` | `Playlist Title/Channel - 20211023 - Video Title [VideoID].mp4` |
-
-## First Run
-
-On first run, the script detects your platform and downloads the appropriate yt-dlp binary from GitHub:
-
-| Platform | Binary |
-|----------|--------|
-| Linux x86_64 | `yt-dlp_linux` |
-| Linux ARM64 | `yt-dlp_linux_aarch64` |
-| macOS | `yt-dlp_macos` |
-| Windows x86_64 (Git Bash) | `yt-dlp.exe` |
-| Windows ARM64 (Git Bash) | `yt-dlp_arm64.exe` |
-
-If yt-dlp is already installed and on your `PATH`, the system version is used instead.
 
 ## Jellyfin Integration
 
@@ -131,14 +134,55 @@ BedtimeHistory/
   Bedtime History - 20231015 - The History of Rome [abc123XYZ].jpg
 ```
 
-> **Note:** Jellyfin mode requires `ffmpeg` to be installed for thumbnail conversion to `.jpg`.
-> Install it with `brew install ffmpeg`, `sudo apt install ffmpeg`, or the [Windows builds](https://ffmpeg.org/download.html).
+> **Note:** Jellyfin mode requires ffmpeg for thumbnail conversion to `.jpg`. This is included in the macOS and Windows bundles. Linux users: `sudo apt install ffmpeg`.
+
+## JavaScript Runtime (deno)
+
+yt-dlp uses a JavaScript runtime to access the full range of YouTube clients and video formats. The macOS and Windows bundles include deno — no extra setup needed.
+
+Without a JS runtime, the script automatically falls back to `tv_embedded,ios,web` clients, which works well but may occasionally miss formats or show warnings.
+
+**Priority order at startup:**
+1. Bundled deno (macOS and Windows bundles) — used automatically via `--js-runtimes`
+2. System deno/node/phantomjs on PATH — detected automatically
+3. No runtime found — falls back to limited client list with an info message
+
+**Installing deno manually** (if running the standalone script):
+
+Linux:
+```bash
+curl -fsSL https://deno.land/install.sh | sh
+```
+
+macOS (if not using the bundle):
+```bash
+brew install deno
+```
+
+Windows (PowerShell, if not using the bundle):
+```powershell
+irm https://deno.land/install.ps1 | iex
+```
+
+> **Note:** All bundles include the full `deno` binary from the [official GitHub releases](https://github.com/denoland/deno/releases). This is distinct from `dl.deno.land` which ships `denort` (a slim compile-only runtime) for Linux.
+
+## Keeping Everything Up to Date
+
+YouTube changes frequently, and old versions of yt-dlp and deno can stop working. Run with `-u` periodically to update both at once:
+
+```bash
+./yt-download.sh --update "https://..."
+```
+
+This updates:
+- **yt-dlp** — updated in place (bundled copy or `~/.local/bin/`)
+- **deno** — updated in place if bundled; skipped if using a system install (use your package manager for that)
 
 ## Windows and Long File Paths
 
 Windows has a 260-character path length limit (MAX_PATH) which can cause failures with deeply nested or long-titled downloads.
 
-The script checks the registry automatically. If long path support is not enabled, it adds `--trim-filenames 120` to keep filenames within safe limits. If it is enabled, filenames are left at full length.
+The script checks the registry automatically. If long path support is not enabled, it trims filenames to 200 characters and prints the command to fix it. If it is enabled, filenames are left at full length.
 
 **To enable long path support on Windows 10 1607+ (recommended):**
 
@@ -152,51 +196,8 @@ Option 2 — Registry (run as Administrator in PowerShell):
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1
 ```
 
-Option 2 — Group Policy: `Computer Configuration → Administrative Templates → System → Filesystem → Enable Win32 long paths`
+Option 3 — Group Policy: `Computer Configuration → Administrative Templates → System → Filesystem → Enable Win32 long paths`
 
 A restart or sign-out may be required.
 
 > **Tip:** When installing [Git for Windows](https://git-scm.com/download/win), the installer includes an option to enable long paths — make sure to tick it.
-
-## JavaScript Runtime (Optional but Recommended)
-
-yt-dlp uses a JavaScript runtime to access the full range of YouTube clients and video formats. Without one, the script falls back to `tv_embedded,ios,web` clients automatically, which works well but may occasionally miss formats or quality levels.
-
-If a supported runtime is on your PATH, the script detects it automatically and uses the full client list.
-
-**Install deno (recommended):**
-
-macOS:
-```bash
-brew install deno
-```
-
-Linux:
-```bash
-curl -fsSL https://deno.land/install.sh | sh
-```
-
-Windows (PowerShell, run as Administrator):
-```powershell
-irm https://deno.land/install.ps1 | iex
-```
-
-Windows (Scoop):
-```
-scoop install deno
-```
-
-Windows (Winget):
-```
-winget install DenoLand.Deno
-```
-
-After installing on Windows, restart Git Bash or Cygwin to pick up the updated PATH.
-
-## Keeping yt-dlp Up to Date
-
-YouTube changes frequently, and old versions of yt-dlp can stop working. Run with `-u` periodically:
-
-```bash
-./yt-download.sh --update "https://..."
-```

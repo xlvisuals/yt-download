@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# fix-filenames.sh — Recursively sanitise filenames and folder names
+# filenames-sanitise.sh -- Recursively sanitise filenames and folder names
 # Applies the same rules as yt-download.sh:
 #   - Replace characters forbidden on NTFS/exFAT/APFS/ext4: \ : * ? " < > |
 #   - Trim trailing dots or spaces (NTFS rejects these)
@@ -56,7 +56,7 @@ done
 # Resolve to absolute path so renames don't confuse relative references
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 
-[[ "$DRY_RUN" == true ]] && info "Dry run — nothing will be renamed"
+[[ "$DRY_RUN" == true ]] && info "Dry run -- nothing will be renamed"
 info "Scanning: $TARGET_DIR"
 
 renamed=0
@@ -76,7 +76,7 @@ while IFS= read -r -d '' item; do
 
     new_path="${dir}/${new_name}"
 
-    # Guard against collisions — don't silently overwrite something that already exists
+    # Guard against collisions -- don't silently overwrite something that already exists
     if [[ -e "$new_path" ]]; then
         echo "SKIP (collision): '$item' -> '$new_path' already exists" >&2
         (( skipped++ )) || true
@@ -97,7 +97,7 @@ while IFS= read -r -d '' item; do
 done < <(
     # -depth ensures children are yielded before their parent directory,
     # so we rename from the inside out.
-    # Exclude the root directory itself — we only rename its contents.
+    # Exclude the root directory itself -- we only rename its contents.
     find "$TARGET_DIR" -depth \( -type f -o -type d \) ! -path "$TARGET_DIR"
 )
 
