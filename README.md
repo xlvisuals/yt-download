@@ -13,6 +13,8 @@ A bash script to download YouTube videos, playlists, and entire channels — wit
 - Channel downloads are automatically organised into a named folder
 - Jellyfin-compatible download mode with `info.json` and thumbnail sidecars
 - Bundles include ffmpeg and deno — no separate installs needed on macOS and Windows
+- Detects and aborts on YouTube bot/sign-in errors with clear instructions
+- Cookie-based authentication via browser profile or cookies.txt file
 - Works on macOS, Linux, Windows (Git Bash and Cygwin)
 
 ## Requirements
@@ -54,6 +56,8 @@ Extract the archive for your platform and run `yt-download.sh` from the extracte
 | `-a`, `--audio` | Download audio only as MP3 (no video, no subtitles) |
 | `-j`, `--jellyfin` | Jellyfin-compatible filenames + save `info.json` and thumbnail sidecar |
 | `-o`, `--output DIR` | Save files into `DIR` (default: current directory, or channel name for channel URLs) |
+| `-c`, `--cookies FILE` | Use a Netscape `cookies.txt` file for authentication |
+| `-b`, `--browser BROWSER` | Use cookies from browser: `chrome`, `firefox`, `safari`, `edge` |
 | `-h`, `--help` | Show usage |
 
 ## Examples
@@ -103,7 +107,33 @@ Extract the archive for your platform and run `yt-download.sh` from the extracte
 ./yt-download.sh --update "https://www.youtube.com/@BedtimeHistory/playlists"
 ```
 
+## Authentication (Sign-in / Bot Detection)
+
+Some videos or channels require sign-in, or YouTube may block downloads with a "Sign in to confirm you're not a bot" error. When this happens the script aborts immediately rather than continuing to fail on every subsequent video.
+
+Pass your browser cookies to authenticate:
+
+**From a browser (easiest):**
+```bash
+./yt-download.sh -b chrome "https://..."
+./yt-download.sh -b firefox "https://..."
+./yt-download.sh -b safari "https://..."
+./yt-download.sh -b edge "https://..."
+```
+
+yt-dlp reads the cookies directly from your browser's profile. The browser must be installed on the same machine.
+
+**From a cookies.txt file:**
+```bash
+./yt-download.sh -c ~/cookies.txt "https://..."
+```
+
+Export a Netscape-format `cookies.txt` using a browser extension such as [cookies.txt](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) (Chrome) or [cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/) (Firefox). Useful for server or headless setups where no browser is available.
+
+> **Tip:** If you see bot errors regularly, running `-b chrome` (or your preferred browser) is the most reliable long-term fix. YouTube is more likely to trust cookies from a real browser session.
+
 ## Output Structure
+
 
 | URL type | Output path |
 |----------|-------------|
@@ -182,7 +212,7 @@ This updates:
 
 Windows has a 260-character path length limit (MAX_PATH) which can cause failures with deeply nested or long-titled downloads.
 
-The script checks the registry automatically. If long path support is not enabled, it trims filenames to 200 characters and prints the command to fix it. If it is enabled, filenames are left at full length.
+The script tests this automatically by creating a temporary file with a path longer than 260 characters. If the OS rejects it, filenames are trimmed to 200 characters. If it succeeds, filenames are left at full length.
 
 **To enable long path support on Windows 10 1607+ (recommended):**
 

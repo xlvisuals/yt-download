@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yt-download.sh -- Download YouTube videos, playlists, and channels
 #
-# Version:   2026-05-13
+# Version:   2026-05-14
 # License:   MIT <https://spdx.org/licenses/MIT.html>
 # Copyright: 2026 Axel Busch
 #
@@ -177,6 +177,8 @@ DO_UPDATE=false
 AUDIO_ONLY=false
 JELLYFIN=false
 OUTPUT_DIR=""
+COOKIES_FROM_BROWSER=""
+COOKIES_FILE=""
 BASE_URL=""
 
 usage() {
@@ -189,6 +191,8 @@ Options:
   -a, --audio        Download audio only, as MP3
   -j, --jellyfin     Jellyfin-compatible filenames and save info.json sidecar
   -o, --output DIR   Save files into DIR  (default: current directory)
+  -c, --cookies FILE Use a cookies.txt file for authentication
+  -b, --browser BROWSER  Use cookies from browser (chrome, firefox, safari, edge)
   -h, --help         Show this help
 
 Examples:
@@ -206,6 +210,8 @@ while [[ $# -gt 0 ]]; do
         -a|--audio)  AUDIO_ONLY=true; shift ;;
         -j|--jellyfin) JELLYFIN=true; shift ;;
         -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
+        -c|--cookies) COOKIES_FILE="$2"; shift 2 ;;
+        -b|--browser) COOKIES_FROM_BROWSER="$2"; shift 2 ;;
         -h|--help)   usage 0 ;;
         -*)          echo "Unknown option: $1" >&2; usage 1 ;;
         *)           BASE_URL="$1"; shift ;;
@@ -414,6 +420,14 @@ if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
     fi
 fi
 
+# Cookies for authenticated access
+if [[ -n "$COOKIES_FILE" ]]; then
+    [[ -f "$COOKIES_FILE" ]] || die "Cookies file not found: $COOKIES_FILE"
+    BASE_OPTS+=("--cookies" "$COOKIES_FILE")
+elif [[ -n "$COOKIES_FROM_BROWSER" ]]; then
+    BASE_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
+fi
+
 # If a supported JS runtime is available, let yt-dlp use its full default client
 # list (which includes JS-dependent clients for best quality).
 # Prefer bundled deno, then system deno/node/phantomjs, then fall back to limited clients.
@@ -499,5 +513,23 @@ for url in "${urls[@]}"; do
     check_disk_space "$check_dir" 100
 
     info "Processing: $url"
-    "$YTDLP_BIN" "${OPTS[@]}" -o "$OUT_TEMPLATE" "$url"
+    ytdlp_out="$(mktemp)"
+    # --abort-on-error stops yt-dlp at the first failed video rather than
+    # continuing the playlist. We capture stderr separately so we can detect
+    # the bot/sign-in error and give a clear message, while still showing
+    # all output to the user in real time via tee.
+    set +e
+    "$YTDLP_BIN" "${OPTS[@]}" --abort-on-error -o "$OUT_TEMPLATE" "$url" 2>&1 \
+        | tee "$ytdlp_out"
+    ytdlp_exit="${PIPESTATUS[0]}"
+    set -e
+    if grep -q "Sign in to confirm" "$ytdlp_out" 2>/dev/null; then
+        rm -f "$ytdlp_out"
+        die "YouTube requires sign-in. Use -b BROWSER (e.g. -b chrome) or -c cookies.txt"
+    fi
+    if [[ "$ytdlp_exit" != "0" ]]; then
+        rm -f "$ytdlp_out"
+        die "yt-dlp exited with error code $ytdlp_exit -- aborting"
+    fi
+    rm -f "$ytdlp_out"
 done
