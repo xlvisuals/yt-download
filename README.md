@@ -6,6 +6,7 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 
 - **`yt-download.sh`** — downloads videos, playlists, and channels
 - **`yt-rename.sh`** — renames downloaded files using `.info.json` sidecar metadata
+- **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering
 
 ## Features
 
@@ -16,6 +17,8 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 - Audio-only MP3 download mode
 - Flexible filename control — index, channel name, VideoID, all optional
 - Saves `.info.json` and thumbnail sidecars for Jellyfin and similar media servers
+- Generates Jellyfin `season.nfo` files to fix incorrect season numbering
+- Saves `poster.jpg` in channel and playlist folders for series/season artwork
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
 - Channel downloads are automatically organised into a named folder
 - Bundles include ffmpeg and deno — no separate installs needed on macOS and Windows
@@ -37,11 +40,11 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 
 | Bundle | Includes |
 |--------|----------|
-| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-dlp, ffmpeg, deno (Apple Silicon) |
-| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno (Apple Silicon) |
+| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
 
 Extract the archive for your platform and run the scripts from the extracted folder. No other setup required.
 
@@ -65,6 +68,7 @@ Extract the archive for your platform and run the scripts from the extracted fol
 | `-u`, `--update` | Update yt-dlp and deno before running (URL optional) |
 | `-a`, `--audio` | Download audio only as MP3 (no video, no subtitles) |
 | `-s`, `--sidecar` | Save `.info.json` and thumbnail alongside each video |
+| `-p`, `--posters` | Download folder poster images only, no videos |
 | `--prefix-index` | Prefix playlist index to filename: `001 - Title.mp4` |
 | `--postfix-index` | Postfix playlist index to filename: `Title - 001.mp4` |
 | `--append-channel` | Append channel name to title: `Title - Channel.mp4` |
@@ -118,6 +122,11 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ```bash
 ./yt-download.sh --sidecar --append-channel --keep-id --yes "https://..."
 # -> Some Video Title - Bedtime History [VideoID].mp4
+```
+
+**Fetch folder poster images for an already-downloaded channel:**
+```bash
+./yt-download.sh -p --yes "https://www.youtube.com/@BedtimeHistory/playlists"
 ```
 
 **Update yt-dlp and deno only:**
@@ -185,11 +194,64 @@ Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` pref
 ### Typical Jellyfin workflow
 
 ```bash
-# 1. Download with sidecars
+# 1. Download with sidecars and folder posters
 ./yt-download.sh --sidecar --keep-id --yes "https://www.youtube.com/@BedtimeHistory/playlists"
 
 # 2. Rename for clean display in Jellyfin
 ./yt-rename.sh --append-channel --keep-id ./BedtimeHistory
+
+# 3. Fix Jellyfin season numbering
+./yt-nfo.sh ./BedtimeHistory
+```
+
+---
+
+## yt-nfo.sh
+
+Generates Jellyfin-compatible `season.nfo` and `tvshow.nfo` files in a YouTube channel download folder.
+
+Without these files, Jellyfin infers season numbers from `playlist_index` in the video `info.json`, producing wrong "Season 1", "Season 44" etc. for channels with many playlists. `yt-nfo.sh` writes explicit `season.nfo` files with sequential season numbers (1, 2, 3...) and the playlist folder name as the season title.
+
+### Usage
+
+```
+./yt-nfo.sh [options] <directory>
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-n`, `--dry-run` | Show what would be written without doing anything |
+| `-f`, `--force` | Overwrite existing `.nfo` files (use after adding new playlists) |
+| `-h`, `--help` | Show usage |
+
+### Examples
+
+```bash
+# Preview what would be written
+./yt-nfo.sh --dry-run ~/Videos/ChessKidOfficial
+
+# Generate nfo files
+./yt-nfo.sh ~/Videos/ChessKidOfficial
+
+# Regenerate after adding new playlists
+./yt-nfo.sh --force ~/Videos/ChessKidOfficial
+```
+
+After running, do a **Refresh Metadata** in Jellyfin (with "Replace all existing metadata" checked) on the library to apply the new season numbers.
+
+### What it creates
+
+```
+ChessKidOfficial/
+  tvshow.nfo                <- series title for Jellyfin
+  Beginner Lessons/
+    season.nfo              <- Season 1: Beginner Lessons
+    video [VideoID].mp4
+  Opening Traps/
+    season.nfo              <- Season 2: Opening Traps
+    video [VideoID].mp4
 ```
 
 ---

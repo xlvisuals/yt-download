@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# =============================================================================
 # yt-download.sh -- Download YouTube videos, playlists, and channels
-# =============================================================================
+#
+# Version:   2026-05-15
+# License:   MIT <https://spdx.org/licenses/MIT.html>
+# Copyright: 2026 Axel Busch
 #
 # DESCRIPTION
 #   Downloads YouTube content using yt-dlp. Handles single videos, playlists,
@@ -16,6 +18,7 @@
 #   -u, --update       Update yt-dlp and deno before running (URL optional)
 #   -a, --audio        Download audio only as MP3
 #   -s, --sidecar      Save .info.json and thumbnail alongside each video
+#   -p, --posters      Download folder poster images only (no videos)
 #   --prefix-index     Prefix playlist index to filename: 001 - Title.mp4
 #   --postfix-index    Postfix playlist index to filename: Title - 001.mp4
 #   --append-channel   Append channel name to title: Title - Channel.mp4
@@ -180,6 +183,7 @@ FORCE_YES=false
 DO_UPDATE=false
 AUDIO_ONLY=false
 SIDECAR=false
+POSTERS_ONLY=false
 INDEX_MODE="none"   # none | prefix | postfix
 APPEND_CHANNEL=false
 KEEP_ID=false
@@ -197,6 +201,7 @@ Options:
   -u, --update       Update yt-dlp to the latest release before running
   -a, --audio        Download audio only, as MP3
   -s, --sidecar      Save .info.json and thumbnail alongside each video
+  -p, --posters      Download folder poster images only (no video download)
   --prefix-index     Prefix playlist index: 001 - Title.mp4
   --postfix-index    Postfix playlist index: Title - 001.mp4
   --append-channel   Append channel name to title (if not already present)
@@ -220,6 +225,7 @@ while [[ $# -gt 0 ]]; do
         -u|--update) DO_UPDATE=true;  shift ;;
         -a|--audio)        AUDIO_ONLY=true;        shift ;;
         -s|--sidecar)      SIDECAR=true;           shift ;;
+        -p|--posters)      POSTERS_ONLY=true;      shift ;;
         --prefix-index)    INDEX_MODE="prefix";    shift ;;
         --postfix-index)   INDEX_MODE="postfix";   shift ;;
         --append-channel)  APPEND_CHANNEL=true;    shift ;;
@@ -458,13 +464,30 @@ else
 fi
 
 # Jellyfin-compatible output template:
-# --sidecar: save .info.json and thumbnail alongside each video
+# --sidecar: save .info.json and thumbnail alongside each video,
+# plus poster.jpg in each playlist/channel folder for Jellyfin series/season images
 if [[ "$SIDECAR" == true ]]; then
     BASE_OPTS+=(
         "--write-info-json"
         "--write-thumbnail"
         "--convert-thumbnails" "jpg"
         "--no-write-playlist-metafiles"
+        # Folder-level poster images for Jellyfin series and season artwork
+        "-o" "pl_thumbnail:${OUT_PREFIX}%(playlist_title)s/poster.%(ext)s"
+        "-o" "channel_thumbnail:${OUT_PREFIX}%(channel)s/poster.%(ext)s"
+    )
+fi
+
+# --posters: fetch folder thumbnails only, skip all video downloads
+if [[ "$POSTERS_ONLY" == true ]]; then
+    BASE_OPTS+=(
+        "--skip-download"
+        "--write-thumbnail"
+        "--convert-thumbnails" "jpg"
+        "--no-write-playlist-metafiles"
+        "-o" "pl_thumbnail:${OUT_PREFIX}%(playlist_title)s/poster.%(ext)s"
+        "-o" "channel_thumbnail:${OUT_PREFIX}%(channel)s/poster.%(ext)s"
+        # Also grab per-video thumbnails if sidecar is also set
     )
 fi
 

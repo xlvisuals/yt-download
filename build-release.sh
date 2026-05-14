@@ -66,10 +66,12 @@ mkdir -p "$DIST_DIR" "$CACHE_DIR"
 # ─────────────────────────────────────────────
 SCRIPT="${SCRIPT_DIR}/yt-download.sh"
 RENAME="${SCRIPT_DIR}/yt-rename.sh"
+NFO="${SCRIPT_DIR}/yt-nfo.sh"
 README="${SCRIPT_DIR}/README.md"
-[[ -f "$SCRIPT" ]]        || die "yt-download.sh not found in $SCRIPT_DIR"
-[[ -f "$RENAME" ]]        || die "yt-rename.sh not found in $SCRIPT_DIR"
-[[ -f "$README" ]]        || die "README.md not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT" ]]  || die "yt-download.sh not found in $SCRIPT_DIR"
+[[ -f "$RENAME" ]]  || die "yt-rename.sh not found in $SCRIPT_DIR"
+[[ -f "$NFO" ]]     || die "yt-nfo.sh not found in $SCRIPT_DIR"
+[[ -f "$README" ]]  || die "README.md not found in $SCRIPT_DIR"
 
 # ─────────────────────────────────────────────
 # ffmpeg binary sources
@@ -151,6 +153,7 @@ make_bundle() {
 
     cp "$SCRIPT"        "$stage_dir/yt-download.sh"
     cp "$RENAME"        "$stage_dir/yt-rename.sh"
+    cp "$NFO"           "$stage_dir/yt-nfo.sh"
     cp "$README"        "$stage_dir/README.md"
     cp "$ytdlp_src"  "$stage_dir/$(basename "$ytdlp_src")"
     # Always name ffmpeg binary "ffmpeg" (or "ffmpeg.exe") in the bundle
@@ -169,6 +172,7 @@ make_bundle() {
     chmod +x "$stage_dir/$ffmpeg_name"
     chmod +x "$stage_dir/yt-download.sh"
     chmod +x "$stage_dir/yt-rename.sh"
+    chmod +x "$stage_dir/yt-nfo.sh"
 
     local out_file
     if [[ "$arc_type" == "tar" ]]; then
