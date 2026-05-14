@@ -16,9 +16,11 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 - Best available MP4 quality, with audio
 - Audio-only MP3 download mode
 - Flexible filename control — index, channel name, VideoID, all optional
+- `--jellyfin` shortcut for a complete Jellyfin-ready download in one flag
 - Saves `.info.json` and thumbnail sidecars for Jellyfin and similar media servers
 - Generates Jellyfin `season.nfo` files to fix incorrect season numbering
 - Saves `poster.jpg` in channel and playlist folders for series/season artwork
+- Skips private or unavailable videos and continues the playlist
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
 - Channel downloads are automatically organised into a named folder
 - Bundles include ffmpeg and deno — no separate installs needed on macOS and Windows
@@ -67,11 +69,13 @@ Extract the archive for your platform and run the scripts from the extracted fol
 | `-y`, `--yes` | Download full playlists without prompting |
 | `-u`, `--update` | Update yt-dlp and deno before running (URL optional) |
 | `-a`, `--audio` | Download audio only as MP3 (no video, no subtitles) |
+| `-j`, `--jellyfin` | Shortcut for `--sidecar --append-channel --keep-id --yes` |
 | `-s`, `--sidecar` | Save `.info.json` and thumbnail alongside each video |
-| `-p`, `--posters` | Download folder poster images only, no videos |
+| `-p`, `--posters-only` | Download folder poster images only, no videos |
+| `-m`, `--max N` | Stop after N videos per playlist (useful for testing) |
 | `--prefix-index` | Prefix playlist index to filename: `001 - Title.mp4` |
 | `--postfix-index` | Postfix playlist index to filename: `Title - 001.mp4` |
-| `--append-channel` | Append channel name to title: `Title - Channel.mp4` |
+| `--append-channel` | Append channel name to title (if not already present) |
 | `--keep-id` | Keep `[VideoID]` at end of filename |
 | `-o`, `--output DIR` | Save files into `DIR` (default: current directory, or channel name for channel URLs) |
 | `-c`, `--cookies FILE` | Use a Netscape `cookies.txt` file for authentication |
@@ -95,9 +99,16 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ./yt-download.sh "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxxxxxxx"
 ```
 
-**Download an entire channel's playlists, without prompting:**
+**Download an entire channel's playlists:**
 ```bash
 ./yt-download.sh --yes "https://www.youtube.com/@BedtimeHistory/playlists"
+```
+
+**Download a channel for Jellyfin (recommended):**
+```bash
+./yt-download.sh --jellyfin "https://www.youtube.com/@BedtimeHistory"
+# Equivalent to:
+./yt-download.sh --sidecar --append-channel --keep-id --yes "https://www.youtube.com/@BedtimeHistory"
 ```
 
 **Download a channel into a specific directory:**
@@ -110,23 +121,14 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ./yt-download.sh --audio "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
 
-**Download with sidecars for Jellyfin, keeping VideoID:**
+**Test with just 3 videos per playlist:**
 ```bash
-./yt-download.sh --sidecar --keep-id --yes "https://www.youtube.com/@BedtimeHistory/playlists"
-# -> Some Video Title [VideoID].mp4
-#    Some Video Title [VideoID].info.json
-#    Some Video Title [VideoID].jpg
-```
-
-**Download with channel name and VideoID appended:**
-```bash
-./yt-download.sh --sidecar --append-channel --keep-id --yes "https://..."
-# -> Some Video Title - Bedtime History [VideoID].mp4
+./yt-download.sh --jellyfin --max 3 "https://www.youtube.com/@BedtimeHistory"
 ```
 
 **Fetch folder poster images for an already-downloaded channel:**
 ```bash
-./yt-download.sh -p --yes "https://www.youtube.com/@BedtimeHistory/playlists"
+./yt-download.sh --posters-only --browser firefox "https://www.youtube.com/@BedtimeHistory"
 ```
 
 **Update yt-dlp and deno only:**
@@ -144,7 +146,25 @@ Extract the archive for your platform and run the scripts from the extracted fol
 | Channel (no `-o` given) | `ChannelName/Playlist Title/Video Title.mp4` |
 | With `--keep-id` | `Video Title [VideoID].mp4` |
 | With `--append-channel --keep-id` | `Video Title - Channel [VideoID].mp4` |
+| With `--jellyfin` | `ChannelName/Playlist Title/Video Title - Channel [VideoID].mp4` |
 | With `-a` | `Video Title.mp3` |
+
+### Jellyfin Workflow
+
+The `--jellyfin` flag is the recommended way to download channels for use with the [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin). It combines several flags into one:
+
+```bash
+./yt-download.sh --jellyfin "https://www.youtube.com/@BedtimeHistory"
+```
+
+This single command:
+- Downloads all playlists without prompting
+- Saves `.info.json` and `.jpg` sidecar files alongside each video
+- Appends the channel name to each video title (with deduplication)
+- Keeps `[VideoID]` in each filename for reliable Jellyfin matching
+- Saves `poster.jpg` in each playlist folder and the channel root
+- Writes `tvshow.nfo` and `season.nfo` files for correct Jellyfin season numbering
+- Skips private or unavailable videos and continues
 
 ---
 
@@ -163,6 +183,7 @@ Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` pref
 | Flag | Description |
 |------|-------------|
 | `-n`, `--dry-run` | Show what would be renamed without doing anything |
+| `-a`, `--all` | Process every subfolder in `DIR` as a separate channel |
 | `--prefix-index` | Prefix episode number: `001 - Title.mp4` |
 | `--postfix-index` | Postfix episode number: `Title - 001.mp4` |
 | `--append-channel` | Append channel name if not already in title |
@@ -175,6 +196,10 @@ Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` pref
 # Preview what would change
 ./yt-rename.sh --dry-run ./BedtimeHistory
 
+# Process all channels in a folder at once
+./yt-rename.sh --append-channel --keep-id --all ~/Videos
+./yt-rename.sh --append-channel --keep-id --all .    # current directory
+
 # Strip Channel/Date prefix, keep VideoID
 ./yt-rename.sh --keep-id ./BedtimeHistory
 # "Bedtime History - 20251128 - Henry Hudson's Journey Made Easy [6748DOW_Xps].mp4"
@@ -183,26 +208,9 @@ Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` pref
 # Full Jellyfin-friendly rename with channel appended
 ./yt-rename.sh --append-channel --keep-id ./BedtimeHistory
 # -> "Henry Hudson's Journey Made Easy - Bedtime History [6748DOW_Xps].mp4"
-
-# With episode index prefix
-./yt-rename.sh --prefix-index --keep-id ./BedtimeHistory
-# -> "001 - Henry Hudson's Journey Made Easy [6748DOW_Xps].mp4"
 ```
 
 > **Note:** `--append-channel` skips appending if the channel name is already present in the title (case-insensitive).
-
-### Typical Jellyfin workflow
-
-```bash
-# 1. Download with sidecars and folder posters
-./yt-download.sh --sidecar --keep-id --yes "https://www.youtube.com/@BedtimeHistory/playlists"
-
-# 2. Rename for clean display in Jellyfin
-./yt-rename.sh --append-channel --keep-id ./BedtimeHistory
-
-# 3. Fix Jellyfin season numbering
-./yt-nfo.sh ./BedtimeHistory
-```
 
 ---
 
@@ -211,6 +219,8 @@ Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` pref
 Generates Jellyfin-compatible `season.nfo` and `tvshow.nfo` files in a YouTube channel download folder.
 
 Without these files, Jellyfin infers season numbers from `playlist_index` in the video `info.json`, producing wrong "Season 1", "Season 44" etc. for channels with many playlists. `yt-nfo.sh` writes explicit `season.nfo` files with sequential season numbers (1, 2, 3...) and the playlist folder name as the season title.
+
+> **Note:** When using `--jellyfin`, these files are generated automatically. `yt-nfo.sh` is for fixing existing downloads or re-generating after adding new playlists.
 
 ### Usage
 
@@ -224,19 +234,22 @@ Without these files, Jellyfin infers season numbers from `playlist_index` in the
 |------|-------------|
 | `-n`, `--dry-run` | Show what would be written without doing anything |
 | `-f`, `--force` | Overwrite existing `.nfo` files (use after adding new playlists) |
+| `-a`, `--all` | Process every subfolder in `DIR` as a separate channel |
 | `-h`, `--help` | Show usage |
 
 ### Examples
 
 ```bash
-# Preview what would be written
-./yt-nfo.sh --dry-run ~/Videos/ChessKidOfficial
-
-# Generate nfo files
+# Generate nfo files for one channel
 ./yt-nfo.sh ~/Videos/ChessKidOfficial
+
+# Process all channels in a folder at once
+./yt-nfo.sh --all ~/Videos
+./yt-nfo.sh --all .           # current directory
 
 # Regenerate after adding new playlists
 ./yt-nfo.sh --force ~/Videos/ChessKidOfficial
+./yt-nfo.sh --all --force ~/Videos
 ```
 
 After running, do a **Refresh Metadata** in Jellyfin (with "Replace all existing metadata" checked) on the library to apply the new season numbers.
@@ -246,11 +259,14 @@ After running, do a **Refresh Metadata** in Jellyfin (with "Replace all existing
 ```
 ChessKidOfficial/
   tvshow.nfo                <- series title for Jellyfin
+  poster.jpg                <- channel artwork
   Beginner Lessons/
     season.nfo              <- Season 1: Beginner Lessons
+    poster.jpg              <- playlist artwork
     video [VideoID].mp4
   Opening Traps/
     season.nfo              <- Season 2: Opening Traps
+    poster.jpg              <- playlist artwork
     video [VideoID].mp4
 ```
 
@@ -258,7 +274,7 @@ ChessKidOfficial/
 
 ## Authentication (Sign-in / Bot Detection)
 
-Some videos or channels require sign-in, or YouTube may block downloads with a "Sign in to confirm you're not a bot" error. When this happens the script aborts immediately rather than continuing to fail on every subsequent video.
+Some videos or channels require sign-in, or YouTube may block downloads with a "Sign in to confirm you're not a bot" error. When this happens the script aborts immediately rather than continuing to fail on every subsequent video. Private or unavailable videos within a playlist are skipped automatically.
 
 **From a browser (easiest):**
 ```bash

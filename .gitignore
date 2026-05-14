@@ -1,10 +1,12 @@
 # Covers JetBrains IDEs: IntelliJ, GoLand, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio, WebStorm and Rider
 # Reference: https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
 
-# Build and Dist directories
+# Ignore working directories
 .build-cache/
 build/
 dist/
+scratch/
+tmp/
 
 # User-specific stuff
 .idea/**/workspace.xml

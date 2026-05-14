@@ -18,13 +18,15 @@
 #   -u, --update       Update yt-dlp and deno before running (URL optional)
 #   -a, --audio        Download audio only as MP3
 #   -s, --sidecar      Save .info.json and thumbnail alongside each video
-#   -p, --posters      Download folder poster images only (no videos)
+#   -p, --posters-only      Download folder poster images only (no videos)
 #   --prefix-index     Prefix playlist index to filename: 001 - Title.mp4
 #   --postfix-index    Postfix playlist index to filename: Title - 001.mp4
 #   --append-channel   Append channel name to title: Title - Channel.mp4
 #   --keep-id          Keep [VideoID] at end of filename
+#   -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes
 #   -o, --output DIR   Save files into DIR (default: current directory,
 #                      or channel name for channel URLs)
+#   -m, --max N        Stop after N videos per playlist (useful for testing)
 #   -c, --cookies FILE Use a Netscape cookies.txt file for authentication
 #   -b, --browser BR   Use cookies from browser (chrome, firefox, safari, edge)
 #   -h, --help         Show usage
@@ -190,6 +192,7 @@ KEEP_ID=false
 OUTPUT_DIR=""
 COOKIES_FROM_BROWSER=""
 COOKIES_FILE=""
+MAX_DOWNLOADS=""
 BASE_URL=""
 
 usage() {
@@ -201,12 +204,14 @@ Options:
   -u, --update       Update yt-dlp to the latest release before running
   -a, --audio        Download audio only, as MP3
   -s, --sidecar      Save .info.json and thumbnail alongside each video
-  -p, --posters      Download folder poster images only (no video download)
+  -p, --posters-only      Download folder poster images only (no video download)
   --prefix-index     Prefix playlist index: 001 - Title.mp4
   --postfix-index    Postfix playlist index: Title - 001.mp4
   --append-channel   Append channel name to title (if not already present)
   --keep-id          Keep [VideoID] at end of filename
+  -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes
   -o, --output DIR   Save files into DIR  (default: current directory)
+  -m, --max N        Stop after N videos per playlist (useful for testing)
   -c, --cookies FILE Use a cookies.txt file for authentication
   -b, --browser BROWSER  Use cookies from browser (chrome, firefox, safari, edge)
   -h, --help         Show this help
@@ -225,12 +230,14 @@ while [[ $# -gt 0 ]]; do
         -u|--update) DO_UPDATE=true;  shift ;;
         -a|--audio)        AUDIO_ONLY=true;        shift ;;
         -s|--sidecar)      SIDECAR=true;           shift ;;
-        -p|--posters)      POSTERS_ONLY=true;      shift ;;
+        -j|--jellyfin)     SIDECAR=true; APPEND_CHANNEL=true; KEEP_ID=true; FORCE_YES=true; shift ;;
+        -p|--posters-only)      POSTERS_ONLY=true;      shift ;;
         --prefix-index)    INDEX_MODE="prefix";    shift ;;
         --postfix-index)   INDEX_MODE="postfix";   shift ;;
         --append-channel)  APPEND_CHANNEL=true;    shift ;;
         --keep-id)         KEEP_ID=true;           shift ;;
         -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
+        -n|--max)    MAX_DOWNLOADS="$2"; shift 2 ;;
         -c|--cookies) COOKIES_FILE="$2"; shift 2 ;;
         -b|--browser) COOKIES_FROM_BROWSER="$2"; shift 2 ;;
         -h|--help)   usage 0 ;;
@@ -288,6 +295,12 @@ elif [[ "$BASE_URL" == *"/@"* || "$BASE_URL" == */channel/* || "$BASE_URL" == */
     if [[ "$BASE_URL" == *"/@"* ]]; then
         # /@ChannelName/... -- name is right there in the URL, no extra yt-dlp call needed
         CHANNEL_NAME="$(echo "$BASE_URL" | sed 's|.*/@||; s|/.*||')"
+        # If URL has no path after the channel handle, append /playlists so
+        # the flat-playlist expansion returns playlist IDs not video IDs
+        if [[ "$BASE_URL" =~ ^https://www\.youtube\.com/@[^/]+/?$ ]]; then
+            BASE_URL="${BASE_URL%/}/playlists"
+            info "Appended /playlists to channel URL: $BASE_URL"
+        fi
     else
         # /channel/UCxxx or /user/Name -- ask yt-dlp for the uploader name
         info "Detecting channel name..."
@@ -384,8 +397,95 @@ if [[ ! "$proceed" =~ ^[yY]$ ]]; then
 fi
 
 
+# Fetch playlist and channel poster images for Jellyfin.
+# Called from --posters-only mode and after --sidecar downloads.
+fetch_posters() {
+    local out_prefix="$1"  # e.g. "ChannelName/" or ""
+
+    # Build poster fetch opts
+    local POSTER_OPTS=(
+        "--flat-playlist"
+        "--write-thumbnail"
+        "--convert-thumbnails" "jpg"
+        "--no-overwrites"
+        "--windows-filenames"
+        "--no-part"
+        "--quiet"
+        "--no-warnings"
+        "--extractor-args" "youtubetab:skip=authcheck"
+        "-o" "thumbnail:"
+        "-o" "pl_thumbnail:${out_prefix}%(playlist_title)s/poster.%(ext)s"
+    )
+    [[ -n "$COOKIES_FILE" ]]         && POSTER_OPTS+=("--cookies" "$COOKIES_FILE")
+    [[ -n "$COOKIES_FROM_BROWSER" ]] && POSTER_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
+    if [[ -n "${FFMPEG_BIN:-}" ]]; then
+        if [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
+            POSTER_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
+        else
+            POSTER_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
+        fi
+    fi
+    [[ -n "${DENO_BIN:-}" ]] && POSTER_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
+
+    # Fetch playlist posters
+    for url in "${urls[@]}"; do
+        info "Fetching poster: $url"
+        set +e
+        "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$url" 2>&1
+        set -e
+    done
+
+    # Fetch channel-level poster.jpg if we have a channel output directory
+    if [[ -n "$out_prefix" ]]; then
+        local channel_dir
+        channel_dir="$(cd "${out_prefix%/}" && pwd)"  # absolute path avoids yt-dlp appending channel name
+        local channel_poster="${channel_dir}/poster.jpg"
+        if [[ ! -f "$channel_poster" ]]; then
+            info "Fetching channel poster..."
+            local _tmp="${BASE_URL#*/@}"
+            local _handle="${_tmp%%/*}"
+            local channel_url="https://www.youtube.com/@${_handle}"
+            # Build opts without --flat-playlist for the channel page
+            local CHANNEL_POSTER_OPTS=()
+            local opt
+            for opt in "${POSTER_OPTS[@]}"; do
+                [[ "$opt" == "--flat-playlist" ]] && continue
+                CHANNEL_POSTER_OPTS+=("$opt")
+            done
+            # Use a temp filename then rename to poster.jpg to avoid any
+            # path construction yt-dlp might do with the channel name
+            local tmp_poster="${channel_dir}/.poster_tmp.%(ext)s"
+            set +e
+            "$YTDLP_BIN" \
+                "--skip-download" \
+                "--write-thumbnail" \
+                "--convert-thumbnails" "jpg" \
+                "--no-overwrites" \
+                "--playlist-items" "0" \
+                "--quiet" \
+                "-o" "thumbnail:${tmp_poster}" \
+                "${CHANNEL_POSTER_OPTS[@]}" \
+                "$channel_url" 2>&1
+            set -e
+            # yt-dlp writes the channel poster into a subfolder with the channel name.
+            # Move it to the proper location and remove the extra folder
+            local channel_poster_tmp_folder="${channel_dir}/${CHANNEL_NAME}"
+            local channel_poster_tmp_file="${channel_poster_tmp_folder}/poster.jpg"
+            [[ -f "$channel_poster_tmp_file" ]] && mv "$channel_poster_tmp_file" "$channel_poster"
+            [[ -d "$channel_poster_tmp_folder" ]] && rm -rf "$channel_poster_tmp_folder"
+        fi
+    fi
+}
+
 # -- 7. Process each URL --
 
+# --posters-only mode: completely independent — build its own opts and skip
+# all other flag processing (naming, sidecar, audio, format selection etc.)
+if [[ "$POSTERS_ONLY" == true ]]; then
+    fetch_posters "$OUT_PREFIX"
+    info "Done fetching posters"
+    exit 0
+fi
 # Common yt-dlp options (array - no word-splitting surprises)
 if [[ "$AUDIO_ONLY" == true ]]; then
     BASE_OPTS=(
@@ -472,28 +572,49 @@ if [[ "$SIDECAR" == true ]]; then
         "--write-thumbnail"
         "--convert-thumbnails" "jpg"
         "--no-write-playlist-metafiles"
-        # Folder-level poster images for Jellyfin series and season artwork
-        "-o" "pl_thumbnail:${OUT_PREFIX}%(playlist_title)s/poster.%(ext)s"
-        "-o" "channel_thumbnail:${OUT_PREFIX}%(channel)s/poster.%(ext)s"
-    )
-fi
-
-# --posters: fetch folder thumbnails only, skip all video downloads
-if [[ "$POSTERS_ONLY" == true ]]; then
-    BASE_OPTS+=(
-        "--skip-download"
-        "--write-thumbnail"
-        "--convert-thumbnails" "jpg"
-        "--no-write-playlist-metafiles"
-        "-o" "pl_thumbnail:${OUT_PREFIX}%(playlist_title)s/poster.%(ext)s"
-        "-o" "channel_thumbnail:${OUT_PREFIX}%(channel)s/poster.%(ext)s"
-        # Also grab per-video thumbnails if sidecar is also set
+        "--no-overwrites"
     )
 fi
 
 # Build the output filename template from the naming flags.
 # yt-dlp supports %(channel)s, %(title)s, %(id)s, %(playlist_index)s etc.
 # We compose a title portion and wrap it with optional index and [id].
+# Write tvshow.nfo and season.nfo files for Jellyfin.
+# Called once after all downloads complete when --sidecar is set.
+write_nfo_files() {
+    local out_prefix="$1"
+    local root_dir="${out_prefix%/}"
+    [[ -z "$root_dir" ]] && root_dir="."
+
+    # tvshow.nfo in the root (channel) folder
+    local tvshow_nfo="${root_dir}/tvshow.nfo"
+    if [[ ! -f "$tvshow_nfo" ]]; then
+        local show_title
+        show_title="$(basename "$root_dir")"
+        printf '<?xml version="1.0" encoding="utf-8"?>\n<tvshow>\n  <title>%s</title>\n</tvshow>\n' \
+            "$show_title" > "$tvshow_nfo"
+        info "Written: $tvshow_nfo"
+    fi
+
+
+    # season.nfo in each playlist subfolder that contains media
+    local season_num=0
+    while IFS= read -r -d "" playlist_dir; do
+        if ! find "$playlist_dir" -maxdepth 1 \
+                \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \
+                   -o -name "*.m4a" -o -name "*.mp3" \) \
+                -print -quit 2>/dev/null | grep -q .; then
+            continue
+        fi
+        (( season_num++ )) || true
+        local playlist_title
+        playlist_title="$(basename "$playlist_dir")"
+        printf '<?xml version="1.0" encoding="utf-8"?>\n<season>\n  <title>%s</title>\n  <seasonnumber>%d</seasonnumber>\n</season>\n' \
+            "$playlist_title" "$season_num" > "${playlist_dir}/season.nfo"
+        info "Written: ${playlist_dir}/season.nfo (Season ${season_num}: ${playlist_title})"
+    done < <(find "$root_dir" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+}
+
 build_template() {  # build_template <in_playlist: true|false>
     local in_playlist="$1"
     local title_part="%(title)s"
@@ -528,6 +649,9 @@ build_template() {  # build_template <in_playlist: true|false>
 
 # Avoid .part files -- write directly to final filename
 BASE_OPTS+=("--no-part")
+
+# Limit downloads per playlist if requested (useful for testing)
+[[ -n "$MAX_DOWNLOADS" ]] && BASE_OPTS+=("--max-downloads" "$MAX_DOWNLOADS")
 
 for url in "${urls[@]}"; do
     OPTS=("${BASE_OPTS[@]}")
@@ -568,12 +692,10 @@ for url in "${urls[@]}"; do
 
     info "Processing: $url"
     ytdlp_out="$(mktemp)"
-    # --abort-on-error stops yt-dlp at the first failed video rather than
-    # continuing the playlist. We capture stderr separately so we can detect
-    # the bot/sign-in error and give a clear message, while still showing
-    # all output to the user in real time via tee.
+    # --ignore-errors skips unavailable/private videos and continues the playlist.
+    # We still capture output to detect the bot/sign-in error which requires aborting.
     set +e
-    "$YTDLP_BIN" "${OPTS[@]}" --abort-on-error -o "$OUT_TEMPLATE" "$url" 2>&1 \
+    "$YTDLP_BIN" "${OPTS[@]}" --ignore-errors -o "$OUT_TEMPLATE" "$url" 2>&1 \
         | tee "$ytdlp_out"
     ytdlp_exit="${PIPESTATUS[0]}"
     set -e
@@ -581,9 +703,24 @@ for url in "${urls[@]}"; do
         rm -f "$ytdlp_out"
         die "YouTube requires sign-in. Use -b BROWSER (e.g. -b chrome) or -c cookies.txt"
     fi
-    if [[ "$ytdlp_exit" != "0" ]]; then
+    # Exit code 1 with no bot error means some videos were skipped (private/unavailable)
+    # Exit code 101  means Maximum number of downloads reached, stopping due to --max-downloads
+    # Exit code > 1 and not 101 means a more serious error -- abort
+    if [[ "$ytdlp_exit" -gt 1 && "$ytdlp_exit" != 101 ]]; then
         rm -f "$ytdlp_out"
         die "yt-dlp exited with error code $ytdlp_exit -- aborting"
     fi
     rm -f "$ytdlp_out"
 done
+
+# Write Jellyfin nfo files once after all downloads are complete
+if [[ "$SIDECAR" == true ]]; then
+    write_nfo_files "$OUT_PREFIX"
+
+    # Fetch playlist poster images via a separate flat-playlist pass.
+    # This is the same approach as --posters-only and correctly retrieves
+    # the playlist thumbnail (pl_thumbnail) without conflicting with
+    # --no-write-playlist-metafiles used during the main download.
+    info "Fetching playlist and channel poster images..."
+    fetch_posters "$OUT_PREFIX"
+fi

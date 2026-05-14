@@ -28,6 +28,7 @@ and VideoID. Renames all sidecar files (.info.json, .jpg, .webp, .srt) together.
 
 Options:
   -n, --dry-run       Show what would be renamed without doing anything
+  -a, --all           Process every subfolder in DIR as a separate channel
   --prefix-index      Prefix episode number: 001 - Title.mp4
   --postfix-index     Postfix episode number: Title - 001.mp4
   --keep-id           Keep the [VideoID] at the end of the filename
@@ -51,6 +52,7 @@ sanitise() {
 
 # --- Parse arguments ---
 DRY_RUN=false
+ALL=false
 INDEX_MODE="none"   # none | prefix | postfix
 KEEP_ID=false
 APPEND_CHANNEL=false
@@ -59,6 +61,7 @@ TARGET_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -n|--dry-run)      DRY_RUN=true;             shift ;;
+        -a|--all)          ALL=true;                 shift ;;
         --prefix-index)    INDEX_MODE="prefix";       shift ;;
         --postfix-index)   INDEX_MODE="postfix";      shift ;;
         --keep-id)         KEEP_ID=true;              shift ;;
@@ -69,9 +72,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "$TARGET_DIR" ]] && usage 1
+[[ -z "$TARGET_DIR" ]] && TARGET_DIR="."
 [[ -d "$TARGET_DIR" ]] || die "'$TARGET_DIR' is not a directory."
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+
+# --all: run on every subdirectory of TARGET_DIR
+if [[ "$ALL" == true ]]; then
+    found=0
+    while IFS= read -r -d "" subdir; do
+        info "Processing: $(basename "$subdir")"
+        extra_flags=""
+        [[ "$DRY_RUN"        == true ]]    && extra_flags="$extra_flags --dry-run"
+        [[ "$KEEP_ID"        == true ]]    && extra_flags="$extra_flags --keep-id"
+        [[ "$APPEND_CHANNEL" == true ]]    && extra_flags="$extra_flags --append-channel"
+        [[ "$INDEX_MODE"     == "prefix" ]] && extra_flags="$extra_flags --prefix-index"
+        [[ "$INDEX_MODE"     == "postfix" ]] && extra_flags="$extra_flags --postfix-index"
+        # shellcheck disable=SC2086
+        bash "$0" $extra_flags "$subdir"
+        echo ""
+        (( found++ )) || true
+    done < <(find "$TARGET_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+    [[ "$found" -eq 0 ]] && die "No subdirectories found in $TARGET_DIR"
+    exit 0
+fi
 
 [[ "$DRY_RUN" == true ]] && info "Dry run -- nothing will be renamed"
 info "Scanning: $TARGET_DIR"
