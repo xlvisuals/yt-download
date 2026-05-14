@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
+# =============================================================================
 # yt-download.sh -- Download YouTube videos, playlists, and channels
-#
-# Version:   2026-05-14
-# License:   MIT <https://spdx.org/licenses/MIT.html>
-# Copyright: 2026 Axel Busch
+# =============================================================================
 #
 # DESCRIPTION
 #   Downloads YouTube content using yt-dlp. Handles single videos, playlists,
@@ -17,16 +15,22 @@
 #   -y, --yes          Download full playlists without prompting
 #   -u, --update       Update yt-dlp and deno before running (URL optional)
 #   -a, --audio        Download audio only as MP3
-#   -j, --jellyfin     Jellyfin-compatible filenames with info.json and
-#                      thumbnail sidecars (requires ffmpeg)
+#   -s, --sidecar      Save .info.json and thumbnail alongside each video
+#   --prefix-index     Prefix playlist index to filename: 001 - Title.mp4
+#   --postfix-index    Postfix playlist index to filename: Title - 001.mp4
+#   --append-channel   Append channel name to title: Title - Channel.mp4
+#   --keep-id          Keep [VideoID] at end of filename
 #   -o, --output DIR   Save files into DIR (default: current directory,
 #                      or channel name for channel URLs)
+#   -c, --cookies FILE Use a Netscape cookies.txt file for authentication
+#   -b, --browser BR   Use cookies from browser (chrome, firefox, safari, edge)
 #   -h, --help         Show usage
 #
 # EXAMPLES
 #   ./yt-download.sh "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 #   ./yt-download.sh --yes "https://www.youtube.com/@BedtimeHistory/playlists"
-#   ./yt-download.sh --jellyfin --yes "https://www.youtube.com/playlist?list=PLxxx"
+#   ./yt-download.sh --sidecar --yes "https://www.youtube.com/playlist?list=PLxxx"
+#   ./yt-download.sh --sidecar --keep-id --append-channel --yes "https://..."
 #   ./yt-download.sh -a -y "https://www.youtube.com/playlist?list=PLxxx"
 #   ./yt-download.sh -u
 #
@@ -47,18 +51,18 @@
 #   macOS, Linux, Windows (Git Bash, Cygwin)
 #
 # NOTES
-#   - On Windows, tests for LongPathsEnabled and trims filenames to 200 chars if not
-#     set. In order to enable long paths, run the following with Administrator rights:
-#         reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
-#     and reboot.
+#   - On Windows, tests long path support by creating a test file. If the OS
+#     rejects paths over 260 chars, filenames are trimmed to 200 chars.
+#     To enable long paths, run as Administrator:
+#     reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem"
+#             /v LongPathsEnabled /t REG_DWORD /d 1 /f
 #   - Jellyfin mode requires ffmpeg for thumbnail conversion and format merging.
-#     https://github.com/ankenyr/jellyfin-youtube-metadata-plugin
 #   - yt-dlp is downloaded automatically to ~/.local/bin if not bundled or on PATH.
 #
 # SEE ALSO
-#   build-release.sh         -- builds platform bundles with all dependencies
-#   filenames-sanitise.sh    -- sanitises filenames recursively for cross-platform use
-#   filenames-dejellyfin.sh  -- converts Jellyfin-style filenames to normal style
+#   build-release.sh   -- builds platform bundles with all dependencies
+#   fix-filenames.sh   -- sanitises filenames recursively for cross-platform use
+#   dejellyfin.sh      -- converts Jellyfin-style filenames to normal style
 # =============================================================================
 
 # --- 0. Helpers ---
@@ -175,7 +179,10 @@ fi
 FORCE_YES=false
 DO_UPDATE=false
 AUDIO_ONLY=false
-JELLYFIN=false
+SIDECAR=false
+INDEX_MODE="none"   # none | prefix | postfix
+APPEND_CHANNEL=false
+KEEP_ID=false
 OUTPUT_DIR=""
 COOKIES_FROM_BROWSER=""
 COOKIES_FILE=""
@@ -189,7 +196,11 @@ Options:
   -y, --yes          Automatically download full playlists without asking
   -u, --update       Update yt-dlp to the latest release before running
   -a, --audio        Download audio only, as MP3
-  -j, --jellyfin     Jellyfin-compatible filenames and save info.json sidecar
+  -s, --sidecar      Save .info.json and thumbnail alongside each video
+  --prefix-index     Prefix playlist index: 001 - Title.mp4
+  --postfix-index    Postfix playlist index: Title - 001.mp4
+  --append-channel   Append channel name to title (if not already present)
+  --keep-id          Keep [VideoID] at end of filename
   -o, --output DIR   Save files into DIR  (default: current directory)
   -c, --cookies FILE Use a cookies.txt file for authentication
   -b, --browser BROWSER  Use cookies from browser (chrome, firefox, safari, edge)
@@ -207,8 +218,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes)    FORCE_YES=true;  shift ;;
         -u|--update) DO_UPDATE=true;  shift ;;
-        -a|--audio)  AUDIO_ONLY=true; shift ;;
-        -j|--jellyfin) JELLYFIN=true; shift ;;
+        -a|--audio)        AUDIO_ONLY=true;        shift ;;
+        -s|--sidecar)      SIDECAR=true;           shift ;;
+        --prefix-index)    INDEX_MODE="prefix";    shift ;;
+        --postfix-index)   INDEX_MODE="postfix";   shift ;;
+        --append-channel)  APPEND_CHANNEL=true;    shift ;;
+        --keep-id)         KEEP_ID=true;           shift ;;
         -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
         -c|--cookies) COOKIES_FILE="$2"; shift 2 ;;
         -b|--browser) COOKIES_FROM_BROWSER="$2"; shift 2 ;;
@@ -443,18 +458,50 @@ else
 fi
 
 # Jellyfin-compatible output template:
-# Channel - YYYYMMDD - Title [VideoID].ext
-# info.json and thumbnail share the same base name so Jellyfin can match them.
-if [[ "$JELLYFIN" == true ]]; then
-    JELLYFIN_TEMPLATE="%(channel)s - %(upload_date)s - %(title)s [%(id)s].%(ext)s"
-    JELLYFIN_PLAYLIST_TEMPLATE="%(playlist_title)s/%(channel)s - %(upload_date)s - %(title)s [%(id)s].%(ext)s"
+# --sidecar: save .info.json and thumbnail alongside each video
+if [[ "$SIDECAR" == true ]]; then
     BASE_OPTS+=(
         "--write-info-json"
         "--write-thumbnail"
         "--convert-thumbnails" "jpg"
-        "--no-write-playlist-metafiles"  # skip playlist-level info.json/thumbnail (has NA date)
+        "--no-write-playlist-metafiles"
     )
 fi
+
+# Build the output filename template from the naming flags.
+# yt-dlp supports %(channel)s, %(title)s, %(id)s, %(playlist_index)s etc.
+# We compose a title portion and wrap it with optional index and [id].
+build_template() {  # build_template <in_playlist: true|false>
+    local in_playlist="$1"
+    local title_part="%(title)s"
+
+    # Append channel name if requested.
+    # Note: yt-dlp templates cannot check if the channel name is already
+    # in the video title, so duplication is possible for videos that include
+    # the channel name in their title. Use dejellyfin --append-channel instead
+    # if you want deduplication after the fact.
+    if [[ "$APPEND_CHANNEL" == true ]]; then
+        title_part="${title_part} - %(channel)s"
+    fi
+
+    # Wrap with index
+    local stem
+    case "$INDEX_MODE" in
+        prefix)  stem="%(playlist_index)03d - ${title_part}" ;;
+        postfix) stem="${title_part} - %(playlist_index)03d" ;;
+        *)       stem="${title_part}" ;;
+    esac
+
+    # Append [VideoID] if requested
+    [[ "$KEEP_ID" == true ]] && stem="${stem} [%(id)s]"
+
+    # Prepend playlist folder for playlist downloads
+    if [[ "$in_playlist" == true ]]; then
+        echo "%(playlist_title)s/${stem}.%(ext)s"
+    else
+        echo "${stem}.%(ext)s"
+    fi
+}
 
 # Avoid .part files -- write directly to final filename
 BASE_OPTS+=("--no-part")
@@ -475,35 +522,19 @@ for url in "${urls[@]}"; do
 
         if [[ "$confirm" =~ ^[yY]$ ]]; then
             OPTS+=("--yes-playlist")
-            if [[ "$JELLYFIN" == true ]]; then
-                OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_PLAYLIST_TEMPLATE}"
-            else
-                OUT_TEMPLATE="${OUT_PREFIX}%(playlist_title)s/%(playlist_index)03d-%(title)s.%(ext)s"
-            fi
+            OUT_TEMPLATE="${OUT_PREFIX}$(build_template true)"
         else
             OPTS+=("--no-playlist")
-            if [[ "$JELLYFIN" == true ]]; then
-                OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_TEMPLATE}"
-            else
-                OUT_TEMPLATE="${OUT_PREFIX}%(title)s.%(ext)s"
-            fi
+            OUT_TEMPLATE="${OUT_PREFIX}$(build_template false)"
         fi
 
     elif [[ "$url" == *"list="* ]]; then
         OPTS+=("--yes-playlist")
-        if [[ "$JELLYFIN" == true ]]; then
-            OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_PLAYLIST_TEMPLATE}"
-        else
-            OUT_TEMPLATE="${OUT_PREFIX}%(playlist_title)s/%(playlist_index)03d-%(title)s.%(ext)s"
-        fi
+        OUT_TEMPLATE="${OUT_PREFIX}$(build_template true)"
 
     else
         OPTS+=("--no-playlist")
-        if [[ "$JELLYFIN" == true ]]; then
-            OUT_TEMPLATE="${OUT_PREFIX}${JELLYFIN_TEMPLATE}"
-        else
-            OUT_TEMPLATE="${OUT_PREFIX}%(title)s.%(ext)s"
-        fi
+        OUT_TEMPLATE="${OUT_PREFIX}$(build_template false)"
     fi
 
     # Check disk space on the output location before starting each download

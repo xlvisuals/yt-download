@@ -1,42 +1,38 @@
 #!/usr/bin/env bash
-# filenames-dejellyfin.sh -- Convert Jellyfin-style filenames back to normal playlist style.
-#
-# Version:   2026-05-13
-# License:   MIT <https://spdx.org/licenses/MIT.html>
-# Copyright: 2026 Axel Busch
+set -euo pipefail
+
+# yt-rename.sh -- Rename YouTube sidecar-style filenames using info.json metadata.
 #
 # Jellyfin style:  Channel - 20231015 - Some Video Title [VideoID].mp4
 # Normal style:    001-Some Video Title.mp4
 #
 # Reads the companion .info.json sidecar to get the playlist index.
+# Requires only bash, grep, and sed -- no Python or other dependencies.
+# Part of the yt-download suite.
 # Renames all sidecar files (.info.json, .jpg, .webp, .srt) to match.
 # Does not change folder structure.
-# Requires python
-
-set -euo pipefail
 
 # --- Helpers ---
-
 die()  { echo "Error: $*" >&2; exit 1; }
 info() { echo "--- $* ---"; }
 
-command -v python3 &>/dev/null || die "python3 is required but not found. Install it and try again."
+
 
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [options] <directory>
 
-Convert Jellyfin-style filenames to normal playlist style.
-
-  Jellyfin: Channel - 20231015 - Some Video Title [VideoID].mp4
-  Normal:   001-Some Video Title.mp4
-
-Reads playlist_index from the .info.json sidecar to determine episode number.
-Renames all matching sidecar files (.info.json, .jpg, .webp, .srt) together.
+Rename YouTube files downloaded with --sidecar, using metadata from .info.json.
+Strips the Channel - Date - prefix, and optionally adds index, channel name,
+and VideoID. Renames all sidecar files (.info.json, .jpg, .webp, .srt) together.
 
 Options:
-  -n, --dry-run    Show what would be renamed without doing anything
-  -h, --help       Show this help
+  -n, --dry-run       Show what would be renamed without doing anything
+  --prefix-index      Prefix episode number: 001 - Title.mp4
+  --postfix-index     Postfix episode number: Title - 001.mp4
+  --keep-id           Keep the [VideoID] at the end of the filename
+  --append-channel    Append channel name: Title - Channel [VideoID].mp4
+  -h, --help          Show this help
 
 Examples:
   $(basename "$0") ~/Videos/BedtimeHistory
@@ -55,14 +51,21 @@ sanitise() {
 
 # --- Parse arguments ---
 DRY_RUN=false
+INDEX_MODE="none"   # none | prefix | postfix
+KEEP_ID=false
+APPEND_CHANNEL=false
 TARGET_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -n|--dry-run) DRY_RUN=true; shift ;;
-        -h|--help)    usage 0 ;;
-        -*)           echo "Unknown option: $1" >&2; usage 1 ;;
-        *)            TARGET_DIR="$1"; shift ;;
+        -n|--dry-run)      DRY_RUN=true;             shift ;;
+        --prefix-index)    INDEX_MODE="prefix";       shift ;;
+        --postfix-index)   INDEX_MODE="postfix";      shift ;;
+        --keep-id)         KEEP_ID=true;              shift ;;
+        --append-channel)  APPEND_CHANNEL=true;       shift ;;
+        -h|--help)         usage 0 ;;
+        -*)                echo "Unknown option: $1" >&2; usage 1 ;;
+        *)                 TARGET_DIR="$1"; shift ;;
     esac
 done
 
@@ -93,36 +96,38 @@ while IFS= read -r -d '' json_file; do
     video_id="${BASH_REMATCH[4]}"
     base_stem="${json_name%.info.json}"   # everything before .info.json
 
-    # Read playlist_index from the json
-    # Use python if available for robust JSON parsing, fall back to grep
-    playlist_index=""
-    if command -v python3 &>/dev/null; then
-        playlist_index="$(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    idx = d.get('playlist_index') or d.get('playlist_autonumber')
-    print(int(idx)) if idx is not None else print('')
-except Exception:
-    print('')
-" "$json_file" 2>/dev/null || true)"
-    else
-        # Fallback: grep for the field
-        playlist_index="$(grep -o '"playlist_index": *[0-9]*' "$json_file" \
-            | grep -o '[0-9]*$' || true)"
+    # Extract playlist index from info.json using grep+sed -- no Python needed
+    # playlist_index is always a plain integer so grep is reliable here
+    playlist_index="$(grep -o '"playlist_index":[^,}]*' "$json_file" \
+        | grep -o '[0-9]*' | head -1 || true)"
+    # Also try playlist_autonumber if playlist_index is absent
+    if [[ -z "$playlist_index" ]]; then
+        playlist_index="$(grep -o '"playlist_autonumber":[^,}]*' "$json_file" \
+            | grep -o '[0-9]*' | head -1 || true)"
     fi
 
-    # Extract title from the Jellyfin filename using Python for reliability.
+    # Read channel name from info.json (used by --append-channel)
+    channel_name=""
+    if [[ "$APPEND_CHANNEL" == true ]]; then
+        channel_name="$(grep -o '"channel":"[^"]*"' "$json_file" \
+            | sed 's/"channel":"//;s/"//' | head -1 || true)"
+        # Fall back to uploader if channel is absent
+        if [[ -z "$channel_name" ]]; then
+            channel_name="$(grep -o '"uploader":"[^"]*"' "$json_file" \
+                | sed 's/"uploader":"//;s/"//' | head -1 || true)"
+        fi
+        # Sanitise the channel name
+        channel_name="$(sanitise "$channel_name")"
+    fi
+
+    # Extract title from the Jellyfin stem using pure bash parameter expansion.
     # Pattern: Channel - YYYYMMDD - Title [VideoID]
-    # The date anchor (8 digits or NA) lets us split unambiguously even when
-    # the channel name itself contains " - ".
-    title="$(python3 -c "
-import re, sys
-stem = sys.argv[1]
-m = re.match(r'^.+ - (?:[0-9]{8}|NA) - (.+) \\[[A-Za-z0-9_-]+\\]\$', stem)
-print(m.group(1) if m else '')
-" "$base_stem" 2>/dev/null || true)"
+    # Strip "Channel - " (shortest prefix up to first " - "),
+    # then strip "YYYYMMDD - " or "NA - " (shortest prefix up to next " - "),
+    # then strip trailing " [VideoID]".
+    after_channel="${base_stem#* - }"        # remove "Channel - "
+    after_date="${after_channel#* - }"       # remove "YYYYMMDD - " or "NA - "
+    title="${after_date% \[${video_id}\]}"  # remove trailing " [VideoID]"
 
     # Sanitise the title
     title="$(sanitise "$title")"
@@ -133,13 +138,29 @@ print(m.group(1) if m else '')
         continue
     fi
 
-    # Build the new base name
+    # Build the new base name according to INDEX_MODE
+    idx_fmt=""
     if [[ -n "$playlist_index" && "$playlist_index" =~ ^[0-9]+$ ]]; then
-        new_stem="$(printf '%03d' "$playlist_index")-${title}"
-    else
-        # No playlist index -- just use the title
-        new_stem="$title"
+        idx_fmt="$(printf '%03d' "$playlist_index")"
     fi
+
+    case "$INDEX_MODE" in
+        prefix)  [[ -n "$idx_fmt" ]] && new_stem="${idx_fmt} - ${title}" || new_stem="$title" ;;
+        postfix) [[ -n "$idx_fmt" ]] && new_stem="${title} - ${idx_fmt}" || new_stem="$title" ;;
+        *)       new_stem="$title" ;;
+    esac
+
+    # Append channel name if requested and not already present in the title
+    # (case-insensitive check to avoid "Some Title - BBC | BBC [id].mp4")
+    if [[ "$APPEND_CHANNEL" == true && -n "$channel_name" ]]; then
+        title_lower="$(echo "$new_stem" | tr "[:upper:]" "[:lower:]")"
+        channel_lower="$(echo "$channel_name" | tr "[:upper:]" "[:lower:]")"
+        if [[ "$title_lower" != *"$channel_lower"* ]]; then
+            new_stem="${new_stem} - ${channel_name}"
+        fi
+    fi
+
+    [[ "$KEEP_ID" == true ]] && new_stem="${new_stem} [${video_id}]"
 
     # Find all files in the same directory sharing this base stem
     # (same stem = same video ID in the original name)
