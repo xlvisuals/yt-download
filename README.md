@@ -4,7 +4,7 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 
 ## Scripts
 
-- **`yt-download.sh`** — downloads videos, playlists, and channels
+- **`yt-download.sh`** — downloads video, videos, shorts, playlists, or whole channel - including artwork
 - **`yt-rename.sh`** — renames downloaded files using `.info.json` sidecar metadata
 - **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering
 
@@ -27,14 +27,14 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 - Bundles include ffmpeg and deno — no separate installs needed on macOS and Windows
 - Detects and aborts on YouTube bot/sign-in errors with clear instructions
 - Cookie-based authentication via browser profile or cookies.txt file
-- Works on macOS, Linux, Windows (Git Bash and Cygwin)
+- Works on macOS, Linux, Windows (Git Bash, Cygwin, and WSL)
 
 ## Requirements
 
-- **bash** (macOS/Linux: built-in; Windows: [Git for Windows](https://git-scm.com/download/win))
+- **bash** (macOS/Linux: built-in; Windows: [Git for Windows](https://git-scm.com/download/win) or WSL)
 - **curl** or **wget** to download yt-dlp on first run (only needed if not using a bundle)
   - macOS: `curl` is always present
-  - Linux: one or both are usually present; if not: `sudo apt install curl`
+  - Linux / WSL: one or both are usually present; if not: `sudo apt install curl`
   - Windows/Git Bash: `curl` ships with Windows 10 1803+ and is available in Git Bash
 
 ## Bundles vs Standalone
@@ -52,6 +52,8 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 Extract the archive for your platform and run the scripts from the extracted folder. No other setup required.
 
 **Standalone** (`yt-download.sh` on its own): yt-dlp is downloaded automatically on first run to `~/.local/bin/`. ffmpeg and deno must be installed separately (see below).
+
+> **WSL users:** Use the Linux bundle (`yt-download_linux_x64.tar.gz` or `yt-download_linux_aarch64.tar.gz`). WSL is essentially Ubuntu and works identically to native Linux.
 
 ---
 
