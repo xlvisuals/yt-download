@@ -11,6 +11,7 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 ## Features
 
 - Downloads single videos, playlists, or whole channels
+- Downloads are compatible with [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin)
 - Automatically downloads and manages [yt-dlp](https://github.com/yt-dlp/yt-dlp) — no manual setup needed
 - Embeds English subtitles as `.srt` into the video file
 - Best available MP4 quality, with audio
@@ -186,6 +187,13 @@ This single command:
 - Saves `poster.jpg` in each playlist folder and the channel root
 - Writes `tvshow.nfo` and `season.nfo` files for correct Jellyfin season numbering
 - Skips private or unavailable videos and continues
+
+If you get authentication error, you might need to sign into YouTube in your browser and provider the --browser parameter:
+
+```bash
+./yt-download.sh --browser firefox --jellyfin "https://www.youtube.com/@BedtimeHistory"
+```
+See **Authentication (Sign-in / Bot Detection)** below for details.
 
 ---
 
