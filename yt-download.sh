@@ -80,6 +80,26 @@ need_cmd() {
     command -v "$1" &>/dev/null || die "'$1' is required but not found. Please install it."
 }
 
+
+# read_tty: prompt the user reliably after a process substitution.
+# - /dev/tty works on macOS, Linux, and Cygwin
+# - Git Bash (MINGW) has no /dev/tty -- reopen stdin from the console explicitly
+read_tty() {   # read_tty <var> <prompt>
+    local __var="$1" __prompt="$2" __val
+    if [[ -e /dev/tty ]]; then
+        read -rp "$__prompt" __val </dev/tty
+    elif [[ -e /dev/con ]]; then
+        # Git Bash / MINGW: /dev/con is the Windows console device
+        read -rp "$__prompt" __val </dev/con
+    else
+        # Last resort: reopen fd 0 from the controlling terminal
+        exec 3<>/dev/stdin
+        read -rp "$__prompt" __val <&3
+        exec 3>&-
+    fi
+    printf -v "$__var" "%s" "$__val"
+}
+
 # Check available disk space on the given path (in MB)
 check_disk_space() {  # check_disk_space <path> <min_mb>
     local path="$1" min_mb="$2"
@@ -194,6 +214,8 @@ COOKIES_FROM_BROWSER=""
 COOKIES_FILE=""
 MAX_DOWNLOADS=""
 BASE_URL=""
+ENDPOINTS=()
+BASE_CHANNEL_URL=""
 
 usage() {
     cat <<EOF
@@ -237,7 +259,7 @@ while [[ $# -gt 0 ]]; do
         --append-channel)  APPEND_CHANNEL=true;    shift ;;
         --keep-id)         KEEP_ID=true;           shift ;;
         -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
-        -n|--max)    MAX_DOWNLOADS="$2"; shift 2 ;;
+        -m|--max)    MAX_DOWNLOADS="$2"; shift 2 ;;
         -c|--cookies) COOKIES_FILE="$2"; shift 2 ;;
         -b|--browser) COOKIES_FROM_BROWSER="$2"; shift 2 ;;
         -h|--help)   usage 0 ;;
@@ -295,11 +317,25 @@ elif [[ "$BASE_URL" == *"/@"* || "$BASE_URL" == */channel/* || "$BASE_URL" == */
     if [[ "$BASE_URL" == *"/@"* ]]; then
         # /@ChannelName/... -- name is right there in the URL, no extra yt-dlp call needed
         CHANNEL_NAME="$(echo "$BASE_URL" | sed 's|.*/@||; s|/.*||')"
-        # If URL has no path after the channel handle, append /playlists so
-        # the flat-playlist expansion returns playlist IDs not video IDs
+        # If URL has no path after the channel handle, prompt for what to download
         if [[ "$BASE_URL" =~ ^https://www\.youtube\.com/@[^/]+/?$ ]]; then
-            BASE_URL="${BASE_URL%/}/playlists"
-            info "Appended /playlists to channel URL: $BASE_URL"
+            CHANNEL_HANDLE="${BASE_URL%/}"
+            CHANNEL_HANDLE="${CHANNEL_HANDLE##*/}"  # just @Name
+            BASE_CHANNEL_URL="${BASE_URL%/}"
+            # Build list of endpoints to download
+            ENDPOINTS=()
+            if [[ "$FORCE_YES" == true ]]; then
+                ENDPOINTS=("playlists" "videos" "shorts")
+            else
+                for endpoint in playlists videos shorts; do
+                    read_tty _ans "Download ${endpoint} from ${CHANNEL_HANDLE}? (y/n): "
+                    [[ "$_ans" =~ ^[yY]$ ]] && ENDPOINTS+=("$endpoint")
+                done
+            fi
+            [[ ${#ENDPOINTS[@]} -eq 0 ]] && { echo "Nothing selected. Bye."; exit 0; }
+            # Set BASE_URL to first endpoint; remaining handled after main loop
+            BASE_URL="${BASE_CHANNEL_URL}/${ENDPOINTS[0]}"
+            info "Will download: ${ENDPOINTS[*]}"
         fi
     else
         # /channel/UCxxx or /user/Name -- ask yt-dlp for the uploader name
@@ -332,8 +368,10 @@ urls=()
 
 if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
       "$BASE_URL" == *"youtube.com/watch?"* || \
-      "$BASE_URL" == *"youtu.be/"* ]]; then
-    # Direct playlist or video URL -- use as-is, no expansion needed
+      "$BASE_URL" == *"youtu.be/"* || \
+      "$BASE_URL" == *"/@"*"/videos" || \
+      "$BASE_URL" == *"/@"*"/shorts" ]]; then
+    # Direct playlist, video, /videos or /shorts URL -- use as-is, no expansion needed
     urls=("$BASE_URL")
 else
     # Channel or other page -- expand into list of playlist URLs
@@ -364,24 +402,6 @@ fi
 
 # -- 6. Confirm to proceed if more than one URL --
 
-# read_tty: prompt the user reliably after a process substitution.
-# - /dev/tty works on macOS, Linux, and Cygwin
-# - Git Bash (MINGW) has no /dev/tty -- reopen stdin from the console explicitly
-read_tty() {   # read_tty <var> <prompt>
-    local __var="$1" __prompt="$2" __val
-    if [[ -e /dev/tty ]]; then
-        read -rp "$__prompt" __val </dev/tty
-    elif [[ -e /dev/con ]]; then
-        # Git Bash / MINGW: /dev/con is the Windows console device
-        read -rp "$__prompt" __val </dev/con
-    else
-        # Last resort: reopen fd 0 from the controlling terminal
-        exec 3<>/dev/stdin
-        read -rp "$__prompt" __val <&3
-        exec 3>&-
-    fi
-    printf -v "$__var" "%s" "$__val"
-}
 
 proceed=""
 if [[ "$FORCE_YES" == true || ${#urls[@]} -eq 1 ]]; then
@@ -647,71 +667,78 @@ build_template() {  # build_template <in_playlist: true|false>
     fi
 }
 
+# Run the full download+sidecar process for a given URL list and prefix
+run_download() {  # run_download <url_list_varname> <out_prefix>
+    local -n _urls="$1"
+    local _prefix="$2"
+    for url in "${_urls[@]}"; do
+        OUT_PREFIX="$_prefix"
+        OPTS=("${BASE_OPTS[@]}")
+        local confirm=""
+        if [[ "$url" == *"watch?v="* && "$url" == *"list="* ]]; then
+            if [[ "$FORCE_YES" == true ]]; then confirm="y"
+            else read_tty confirm "Detected video+playlist URL. Download WHOLE playlist? (y/n): "
+            fi
+            if [[ "$confirm" =~ ^[yY]$ ]]; then
+                OPTS+=("--yes-playlist")
+                OUT_TEMPLATE="${_prefix}$(build_template true)"
+            else
+                OPTS+=("--no-playlist")
+                OUT_TEMPLATE="${_prefix}$(build_template false)"
+            fi
+        elif [[ "$url" == *"list="* || "$url" == *"/videos" || "$url" == *"/shorts" ]]; then
+            OPTS+=("--yes-playlist")
+            OUT_TEMPLATE="${_prefix}$(build_template true)"
+        else
+            OPTS+=("--no-playlist")
+            OUT_TEMPLATE="${_prefix}$(build_template false)"
+        fi
+        check_dir="${_prefix:-.}"
+        check_dir="${check_dir%/}"
+        [[ -z "$check_dir" ]] && check_dir="."
+        check_disk_space "$check_dir" 100
+        info "Processing: $url"
+        local ytdlp_out
+        ytdlp_out="$(mktemp)"
+        set +e
+        "$YTDLP_BIN" "${OPTS[@]}" --ignore-errors -o "$OUT_TEMPLATE" "$url" 2>&1 \
+            | tee "$ytdlp_out"
+        local ytdlp_exit="${PIPESTATUS[0]}"
+        set -e
+        if grep -q "Sign in to confirm" "$ytdlp_out" 2>/dev/null; then
+            rm -f "$ytdlp_out"
+            die "YouTube requires sign-in. Use -b BROWSER or -c cookies.txt"
+        fi
+
+        # Exit code 1 with no bot error means some videos were skipped (private/unavailable)
+        # Exit code 101  means Maximum number of downloads reached, stopping due to --max-downloads
+        # Exit code > 1 and not 101 means a more serious error -- abort
+        if [[ "$ytdlp_exit" -gt 1 && "$ytdlp_exit" != 101 ]]; then
+            rm -f "$ytdlp_out"
+            die "yt-dlp exited with error code $ytdlp_exit -- aborting"
+        fi
+        rm -f "$ytdlp_out"
+    done
+}
+
 # Avoid .part files -- write directly to final filename
 BASE_OPTS+=("--no-part")
 
 # Limit downloads per playlist if requested (useful for testing)
 [[ -n "$MAX_DOWNLOADS" ]] && BASE_OPTS+=("--max-downloads" "$MAX_DOWNLOADS")
 
-for url in "${urls[@]}"; do
-    OPTS=("${BASE_OPTS[@]}")
-    confirm=""
+# Run main download
+run_download urls "$OUT_PREFIX"
 
-    if [[ "$url" == *"watch?v="* && "$url" == *"list="* ]]; then
-        # URL contains both a video ID and a playlist ID
-        if [[ "$FORCE_YES" == true ]]; then
-            confirm="y"
-        else
-            echo
-            echo "Detected a video+playlist URL: $url"
-            read_tty confirm "Download the WHOLE playlist? (y/n): "
-        fi
-
-        if [[ "$confirm" =~ ^[yY]$ ]]; then
-            OPTS+=("--yes-playlist")
-            OUT_TEMPLATE="${OUT_PREFIX}$(build_template true)"
-        else
-            OPTS+=("--no-playlist")
-            OUT_TEMPLATE="${OUT_PREFIX}$(build_template false)"
-        fi
-
-    elif [[ "$url" == *"list="* ]]; then
-        OPTS+=("--yes-playlist")
-        OUT_TEMPLATE="${OUT_PREFIX}$(build_template true)"
-
-    else
-        OPTS+=("--no-playlist")
-        OUT_TEMPLATE="${OUT_PREFIX}$(build_template false)"
-    fi
-
-    # Check disk space on the output location before starting each download
-    check_dir="${OUT_PREFIX:-.}"
-    check_dir="${check_dir%/}"   # strip trailing slash
-    [[ -z "$check_dir" ]] && check_dir="."
-    check_disk_space "$check_dir" 100
-
-    info "Processing: $url"
-    ytdlp_out="$(mktemp)"
-    # --ignore-errors skips unavailable/private videos and continues the playlist.
-    # We still capture output to detect the bot/sign-in error which requires aborting.
-    set +e
-    "$YTDLP_BIN" "${OPTS[@]}" --ignore-errors -o "$OUT_TEMPLATE" "$url" 2>&1 \
-        | tee "$ytdlp_out"
-    ytdlp_exit="${PIPESTATUS[0]}"
-    set -e
-    if grep -q "Sign in to confirm" "$ytdlp_out" 2>/dev/null; then
-        rm -f "$ytdlp_out"
-        die "YouTube requires sign-in. Use -b BROWSER (e.g. -b chrome) or -c cookies.txt"
-    fi
-    # Exit code 1 with no bot error means some videos were skipped (private/unavailable)
-    # Exit code 101  means Maximum number of downloads reached, stopping due to --max-downloads
-    # Exit code > 1 and not 101 means a more serious error -- abort
-    if [[ "$ytdlp_exit" -gt 1 && "$ytdlp_exit" != 101 ]]; then
-        rm -f "$ytdlp_out"
-        die "yt-dlp exited with error code $ytdlp_exit -- aborting"
-    fi
-    rm -f "$ytdlp_out"
-done
+# If a bare channel URL was given, process remaining endpoints
+if [[ -n "${ENDPOINTS[*]+x}" && ${#ENDPOINTS[@]} -gt 1 ]]; then
+    for endpoint in "${ENDPOINTS[@]:1}"; do
+        ep_url="${BASE_CHANNEL_URL}/${endpoint}"
+        info "Fetching content from $ep_url"
+        ep_urls=("$ep_url")
+        run_download ep_urls "$OUT_PREFIX"
+    done
+fi
 
 # Write Jellyfin nfo files once after all downloads are complete
 if [[ "$SIDECAR" == true ]]; then
