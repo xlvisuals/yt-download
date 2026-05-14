@@ -17,6 +17,7 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 - Audio-only MP3 download mode
 - Flexible filename control — index, channel name, VideoID, all optional
 - `--jellyfin` shortcut for a complete Jellyfin-ready download in one flag
+- Downloads channel playlists, videos, and shorts -- separately or all at once
 - Saves `.info.json` and thumbnail sidecars for Jellyfin and similar media servers
 - Generates Jellyfin `season.nfo` files to fix incorrect season numbering
 - Saves `poster.jpg` in channel and playlist folders for series/season artwork
@@ -66,13 +67,13 @@ Extract the archive for your platform and run the scripts from the extracted fol
 
 | Flag | Description |
 |------|-------------|
-| `-y`, `--yes` | Download full playlists without prompting |
+| `-y`, `--yes` | Download without prompting; downloads all (playlists, videos, shorts) when a bare channel URL is given |
 | `-u`, `--update` | Update yt-dlp and deno before running (URL optional) |
 | `-a`, `--audio` | Download audio only as MP3 (no video, no subtitles) |
 | `-j`, `--jellyfin` | Shortcut for `--sidecar --append-channel --keep-id --yes` |
 | `-s`, `--sidecar` | Save `.info.json` and thumbnail alongside each video |
 | `-p`, `--posters-only` | Download folder poster images only, no videos |
-| `-m`, `--max N` | Stop after N videos per playlist (useful for testing) |
+| `-n`, `--max N` | Stop after N videos per playlist (useful for testing) |
 | `--prefix-index` | Prefix playlist index to filename: `001 - Title.mp4` |
 | `--postfix-index` | Postfix playlist index to filename: `Title - 001.mp4` |
 | `--append-channel` | Append channel name to title (if not already present) |
@@ -99,9 +100,24 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ./yt-download.sh "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxxxxxxx"
 ```
 
-**Download an entire channel's playlists:**
+**Download a channel's playlists:**
 ```bash
 ./yt-download.sh --yes "https://www.youtube.com/@BedtimeHistory/playlists"
+```
+
+**Download a channel's videos or shorts:**
+```bash
+./yt-download.sh "https://www.youtube.com/@BedtimeHistory/videos"
+./yt-download.sh "https://www.youtube.com/@BedtimeHistory/shorts"
+```
+
+**Download everything from a channel (prompts for playlists/videos/shorts):**
+```bash
+./yt-download.sh "https://www.youtube.com/@BedtimeHistory"
+# Script will ask: Download playlists? videos? shorts?
+
+# Or download all without prompting:
+./yt-download.sh --yes "https://www.youtube.com/@BedtimeHistory"
 ```
 
 **Download a channel for Jellyfin (recommended):**
@@ -109,6 +125,7 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ./yt-download.sh --jellyfin "https://www.youtube.com/@BedtimeHistory"
 # Equivalent to:
 ./yt-download.sh --sidecar --append-channel --keep-id --yes "https://www.youtube.com/@BedtimeHistory"
+# With --yes / --jellyfin on a bare channel URL, all playlists, videos, and shorts are downloaded.
 ```
 
 **Download a channel into a specific directory:**
@@ -147,6 +164,8 @@ Extract the archive for your platform and run the scripts from the extracted fol
 | With `--keep-id` | `Video Title [VideoID].mp4` |
 | With `--append-channel --keep-id` | `Video Title - Channel [VideoID].mp4` |
 | With `--jellyfin` | `ChannelName/Playlist Title/Video Title - Channel [VideoID].mp4` |
+| Channel `/videos` | `ChannelName/ChannelName - Videos/Video Title.mp4` |
+| Channel `/shorts` | `ChannelName/ChannelName - Shorts/Video Title.mp4` |
 | With `-a` | `Video Title.mp3` |
 
 ### Jellyfin Workflow
