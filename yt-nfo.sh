@@ -29,12 +29,15 @@ and the playlist name as the season title. The root folder gets a tvshow.nfo.
 Options:
   -n, --dry-run    Show what would be written without doing anything
   -f, --force      Overwrite existing .nfo files
+  -a, --all        Process every subfolder in DIR as a separate channel
   -h, --help       Show this help
 
 Examples:
   $(basename "$0") ~/Videos/BedtimeHistory
   $(basename "$0") --dry-run ~/Videos/ChessKidOfficial
   $(basename "$0") --force ~/Videos/BedtimeHistory
+  $(basename "$0") --all ~/Videos
+  $(basename "$0") --all .                 # process all channels in current directory
 EOF
     exit "${1:-0}"
 }
@@ -42,21 +45,40 @@ EOF
 # --- Parse arguments ---
 DRY_RUN=false
 FORCE=false
+ALL=false
 TARGET_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -n|--dry-run) DRY_RUN=true;  shift ;;
         -f|--force)   FORCE=true;    shift ;;
+        -a|--all)     ALL=true;      shift ;;
         -h|--help)    usage 0 ;;
         -*)           echo "Unknown option: $1" >&2; usage 1 ;;
         *)            TARGET_DIR="$1"; shift ;;
     esac
 done
 
-[[ -z "$TARGET_DIR" ]] && usage 1
+[[ -z "$TARGET_DIR" ]] && TARGET_DIR="."
 [[ -d "$TARGET_DIR" ]] || die "'$TARGET_DIR' is not a directory."
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+
+# --all: run on every subdirectory of TARGET_DIR as a separate channel
+if [[ "$ALL" == true ]]; then
+    found=0
+    while IFS= read -r -d "" subdir; do
+        info "Processing channel: $(basename "$subdir")"
+        extra_flags=""
+        [[ "$DRY_RUN" == true ]] && extra_flags="$extra_flags --dry-run"
+        [[ "$FORCE"   == true ]] && extra_flags="$extra_flags --force"
+        # shellcheck disable=SC2086
+        bash "$0" $extra_flags "$subdir"
+        echo ""
+        (( found++ )) || true
+    done < <(find "$TARGET_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+    [[ "$found" -eq 0 ]] && die "No subdirectories found in $TARGET_DIR"
+    exit 0
+fi
 
 [[ "$DRY_RUN" == true ]] && info "Dry run -- nothing will be written"
 info "Processing: $TARGET_DIR"

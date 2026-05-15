@@ -11,7 +11,7 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 ## Features
 
 - Downloads single videos, playlists, or whole channels
-- Downloads are compatible with [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin)
+- Downloads are compatible with [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin) and [jf-ytdlp-info-reader-plugin](https://github.com/ArabCoders/jf-ytdlp-info-reader-plugin/)
 - Automatically downloads and manages [yt-dlp](https://github.com/yt-dlp/yt-dlp) — no manual setup needed
 - Embeds English subtitles as `.srt` into the video file
 - Best available MP4 quality, with audio
@@ -173,7 +173,9 @@ Extract the archive for your platform and run the scripts from the extracted fol
 
 ### Jellyfin Workflow
 
-The `--jellyfin` flag is the recommended way to download channels for use with the [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin). It combines several flags into one:
+The `--jellyfin` flag is the recommended way to download channels for use with [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin) 
+and [jf-ytdlp-info-reader-plugin](https://github.com/ArabCoders/jf-ytdlp-info-reader-plugin/).
+It combines several flags into one: --sidecar, --append-channel, --keep-id, and --yes:
 
 ```bash
 ./yt-download.sh --jellyfin "https://www.youtube.com/@BedtimeHistory"
