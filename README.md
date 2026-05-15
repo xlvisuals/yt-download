@@ -68,23 +68,23 @@ Extract the archive for your platform and run the scripts from the extracted fol
 
 ### Options
 
-| Flag | Description |
-|------|-------------|
-| `-y`, `--yes` | Download without prompting; downloads all (playlists, videos, shorts) when a bare channel URL is given |
-| `-u`, `--update` | Update yt-dlp and deno before running (URL optional) |
-| `-a`, `--audio` | Download audio only as MP3 (no video, no subtitles) |
-| `-j`, `--jellyfin` | Shortcut for `--sidecar --append-channel --keep-id --yes` |
-| `-s`, `--sidecar` | Save `.info.json` and thumbnail alongside each video |
-| `-p`, `--posters-only` | Download folder poster images only, no videos |
-| `-n`, `--max N` | Stop after N videos per playlist (useful for testing) |
-| `--prefix-index` | Prefix playlist index to filename: `001 - Title.mp4` |
-| `--postfix-index` | Postfix playlist index to filename: `Title - 001.mp4` |
-| `--append-channel` | Append channel name to title (if not already present) |
-| `--keep-id` | Keep `[VideoID]` at end of filename |
-| `-o`, `--output DIR` | Save files into `DIR` (default: current directory, or channel name for channel URLs) |
-| `-c`, `--cookies FILE` | Use a Netscape `cookies.txt` file for authentication |
+| Flag                      | Description |
+|---------------------------|-------------|
+| `-y`, `--yes`             | Download without prompting; downloads all (playlists, videos, shorts) when a bare channel URL is given |
+| `-u`, `--update`          | Update yt-dlp and deno before running (URL optional) |
+| `-a`, `--audio`           | Download audio only as MP3 (no video, no subtitles) |
+| `-j`, `--jellyfin`        | Shortcut for `--sidecar --append-channel --keep-id --yes` |
+| `-s`, `--sidecar`         | Save `.info.json` and thumbnail alongside each video |
+| `-p`, `--posters-only`    | Download folder poster images only, no videos |
+| `-m`, `--max N`           | Stop after N videos per playlist (useful for testing) |
+| `--prefix-index`          | Prefix playlist index to filename: `001 - Title.mp4` |
+| `--postfix-index`         | Postfix playlist index to filename: `Title - 001.mp4` |
+| `--append-channel`        | Append channel name to title (if not already present) |
+| `--keep-id`               | Keep `[VideoID]` at end of filename |
+| `-o`, `--output DIR`      | Save files into `DIR` (default: current directory, or channel name for channel URLs) |
+| `-c`, `--cookies FILE`    | Use a Netscape `cookies.txt` file for authentication |
 | `-b`, `--browser BROWSER` | Use cookies from browser: `chrome`, `firefox`, `safari`, `edge` |
-| `-h`, `--help` | Show usage |
+| `-h`, `--help`            | Show usage |
 
 ### Examples
 
