@@ -64,10 +64,6 @@
 #   - Jellyfin mode requires ffmpeg for thumbnail conversion and format merging.
 #   - yt-dlp is downloaded automatically to ~/.local/bin if not bundled or on PATH.
 #
-# SEE ALSO
-#   build-release.sh   -- builds platform bundles with all dependencies
-#   fix-filenames.sh   -- sanitises filenames recursively for cross-platform use
-#   dejellyfin.sh      -- converts Jellyfin-style filenames to normal style
 # =============================================================================
 
 # --- 0. Helpers ---
@@ -113,6 +109,15 @@ check_disk_space() {  # check_disk_space <path> <min_mb>
         device="$(df -Pm "$path" 2>/dev/null | awk 'NR==2 {print $1}')"
         die "Disk full on ${device} -- ${avail_mb}MB available, ${min_mb}MB required. Aborting."
     fi
+}
+
+# Sanitise a name component for use in filenames
+# Replace NTFS-forbidden chars, collapse multiple spaces, trim trailing dots/spaces
+sanitise() {
+    echo "$1" \
+        | sed 's/[\\/:*?"<>|]/_/g' \
+        | sed 's/  */ /g' \
+        | sed 's/[. ]*$//'
 }
 
 # Download with curl (preferred) or wget fallback
@@ -344,9 +349,7 @@ elif [[ "$BASE_URL" == *"/@"* || "$BASE_URL" == */channel/* || "$BASE_URL" == */
     fi
 
     if [[ -n "$CHANNEL_NAME" && "$CHANNEL_NAME" != "NA" ]]; then
-        # Sanitise: replace only characters forbidden on NTFS/exFAT/APFS/ext4
-        # then trim trailing dots or spaces (NTFS rejects those too)
-        CHANNEL_NAME="$(echo "$CHANNEL_NAME" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/[. ]*$//')"
+        CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
         info "Using channel name as output directory: $CHANNEL_NAME"
         mkdir -p "$CHANNEL_NAME" || die "Cannot create output directory: $CHANNEL_NAME"
         OUT_PREFIX="${CHANNEL_NAME}/"
@@ -723,6 +726,9 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
 
 # Avoid .part files -- write directly to final filename
 BASE_OPTS+=("--no-part")
+
+# Skip files that already exist
+BASE_OPTS+=("--no-overwrites")
 
 # Limit downloads per playlist if requested (useful for testing)
 [[ -n "$MAX_DOWNLOADS" ]] && BASE_OPTS+=("--max-downloads" "$MAX_DOWNLOADS")

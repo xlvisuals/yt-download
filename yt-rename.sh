@@ -33,6 +33,7 @@ Options:
   --postfix-index     Postfix episode number: Title - 001.mp4
   --keep-id           Keep the [VideoID] at the end of the filename
   --append-channel    Append channel name: Title - Channel [VideoID].mp4
+  --jellyfin          Shortcut for --append-channel --keep-id (clears any index flags)
   -h, --help          Show this help
 
 Examples:
@@ -47,6 +48,7 @@ EOF
 sanitise() {
     echo "$1" \
         | sed 's/[\\/:*?"<>|]/_/g' \
+        | sed 's/  */ /g' \
         | sed 's/[. ]*$//'
 }
 
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --postfix-index)   INDEX_MODE="postfix";      shift ;;
         --keep-id)         KEEP_ID=true;              shift ;;
         --append-channel)  APPEND_CHANNEL=true;       shift ;;
+        --jellyfin)        APPEND_CHANNEL=true; KEEP_ID=true; INDEX_MODE="none"; shift ;;
         -h|--help)         usage 0 ;;
         -*)                echo "Unknown option: $1" >&2; usage 1 ;;
         *)                 TARGET_DIR="$1"; shift ;;
@@ -102,6 +105,7 @@ info "Scanning: $TARGET_DIR"
 renamed=0
 skipped=0
 errors=0
+current_dir=""
 
 # Process only .info.json files -- they anchor each video's rename
 # Using -maxdepth 3 to handle channel/playlist/file nesting without going too deep
@@ -109,14 +113,25 @@ while IFS= read -r -d '' json_file; do
     dir="$(dirname "$json_file")"
     json_name="$(basename "$json_file")"
 
-    # Match Jellyfin pattern: Channel - YYYYMMDD - Title [VideoID].info.json
-    # The VideoID is inside square brackets just before the extension
-    if [[ ! "$json_name" =~ ^(.+)\ -\ ([0-9]{8}|NA)\ -\ (.+)\ \[([A-Za-z0-9_-]+)\]\.info\.json$ ]]; then
+    # Print a header when we enter a new folder
+    if [[ "$dir" != "$current_dir" ]]; then
+        current_dir="$dir"
+        info "Folder: $dir"
+    fi
+
+    # Try Jellyfin pattern first: Channel - YYYYMMDD - Title [VideoID].info.json
+    # Fall back to clean pattern: Title [VideoID].info.json
+    IS_JELLYFIN=false
+    if [[ "$json_name" =~ ^(.+)\ -\ ([0-9]{8}|NA)\ -\ (.+)\ \[([A-Za-z0-9_-]+)\]\.info\.json$ ]]; then
+        IS_JELLYFIN=true
+        video_id="${BASH_REMATCH[4]}"
+    elif [[ "$json_name" =~ ^(.+)\ \[([A-Za-z0-9_-]+)\]\.info\.json$ ]]; then
+        video_id="${BASH_REMATCH[2]}"
+    else
         (( skipped++ )) || true
         continue
     fi
 
-    video_id="${BASH_REMATCH[4]}"
     base_stem="${json_name%.info.json}"   # everything before .info.json
 
     # Extract playlist index from info.json using grep+sed -- no Python needed
@@ -132,25 +147,27 @@ while IFS= read -r -d '' json_file; do
     # Read channel name from info.json (used by --append-channel)
     channel_name=""
     if [[ "$APPEND_CHANNEL" == true ]]; then
-        channel_name="$(grep -o '"channel":"[^"]*"' "$json_file" \
-            | sed 's/"channel":"//;s/"//' | head -1 || true)"
+        channel_name="$(grep -o '"channel": *"[^"]*"' "$json_file" \
+            | sed 's/^"channel": *"//;s/"$//' | head -1 || true)"
         # Fall back to uploader if channel is absent
         if [[ -z "$channel_name" ]]; then
-            channel_name="$(grep -o '"uploader":"[^"]*"' "$json_file" \
-                | sed 's/"uploader":"//;s/"//' | head -1 || true)"
+            channel_name="$(grep -o '"uploader": *"[^"]*"' "$json_file" \
+                | sed 's/^"uploader": *"//;s/"$//' | head -1 || true)"
         fi
         # Sanitise the channel name
         channel_name="$(sanitise "$channel_name")"
     fi
 
-    # Extract title from the Jellyfin stem using pure bash parameter expansion.
-    # Pattern: Channel - YYYYMMDD - Title [VideoID]
-    # Strip "Channel - " (shortest prefix up to first " - "),
-    # then strip "YYYYMMDD - " or "NA - " (shortest prefix up to next " - "),
-    # then strip trailing " [VideoID]".
-    after_channel="${base_stem#* - }"        # remove "Channel - "
-    after_date="${after_channel#* - }"       # remove "YYYYMMDD - " or "NA - "
-    title="${after_date% \[${video_id}\]}"  # remove trailing " [VideoID]"
+    # Extract title depending on which pattern matched
+    if [[ "$IS_JELLYFIN" == true ]]; then
+        # Strip "Channel - YYYYMMDD - " prefix and " [VideoID]" suffix
+        after_channel="${base_stem#* - }"        # remove "Channel - "
+        after_date="${after_channel#* - }"       # remove "YYYYMMDD - " or "NA - "
+        title="${after_date% \[${video_id}\]}"  # remove trailing " [VideoID]"
+    else
+        # Clean format: just strip trailing " [VideoID]"
+        title="${base_stem% \[${video_id}\]}"
+    fi
 
     # Sanitise the title
     title="$(sanitise "$title")"
