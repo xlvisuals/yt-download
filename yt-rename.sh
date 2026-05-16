@@ -34,6 +34,7 @@ Options:
   --keep-id           Keep the [VideoID] at the end of the filename
   --append-channel    Append channel name: Title - Channel [VideoID].mp4
   --jellyfin          Shortcut for --append-channel --keep-id (clears any index flags)
+  -l, --log DIR      Write log to DIR/yt-rename-TIMESTAMP.log (default: current dir)
   -h, --help          Show this help
 
 Examples:
@@ -54,6 +55,7 @@ sanitise() {
 
 # --- Parse arguments ---
 DRY_RUN=false
+LOG_DIR=""
 ALL=false
 INDEX_MODE="none"   # none | prefix | postfix
 KEEP_ID=false
@@ -69,6 +71,7 @@ while [[ $# -gt 0 ]]; do
         --keep-id)         KEEP_ID=true;              shift ;;
         --append-channel)  APPEND_CHANNEL=true;       shift ;;
         --jellyfin)        APPEND_CHANNEL=true; KEEP_ID=true; INDEX_MODE="none"; shift ;;
+        -l|--log)          LOG_DIR="$2";  shift 2 ;;
         -h|--help)         usage 0 ;;
         -*)                echo "Unknown option: $1" >&2; usage 1 ;;
         *)                 TARGET_DIR="$1"; shift ;;
@@ -98,6 +101,12 @@ if [[ "$ALL" == true ]]; then
     [[ "$found" -eq 0 ]] && die "No subdirectories found in $TARGET_DIR"
     exit 0
 fi
+
+LOG_DIR="${LOG_DIR:-.}"
+mkdir -p "$LOG_DIR" || die "Cannot create log directory: $LOG_DIR"
+LOG_FILE="${LOG_DIR}/yt-rename-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+info "Logging to: $LOG_FILE"
 
 [[ "$DRY_RUN" == true ]] && info "Dry run -- nothing will be renamed"
 info "Scanning: $TARGET_DIR"

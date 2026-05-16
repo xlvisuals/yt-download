@@ -28,6 +28,8 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 - Bundles include ffmpeg and deno — no separate installs needed on macOS and Windows
 - Detects and aborts on YouTube bot/sign-in errors with clear instructions
 - Cookie-based authentication via browser profile or cookies.txt file
+- Writes timestamped log files for easy debugging
+- `--cleanup` removes playlist folders with no media files after download
 - Works on macOS, Linux, Windows (Git Bash, Cygwin, and WSL)
 
 ## Requirements
@@ -68,23 +70,25 @@ Extract the archive for your platform and run the scripts from the extracted fol
 
 ### Options
 
-| Flag                      | Description |
-|---------------------------|-------------|
+| Flag                      | Description                                                                                            |
+|---------------------------|--------------------------------------------------------------------------------------------------------|
 | `-y`, `--yes`             | Download without prompting; downloads all (playlists, videos, shorts) when a bare channel URL is given |
-| `-u`, `--update`          | Update yt-dlp and deno before running (URL optional) |
-| `-a`, `--audio`           | Download audio only as MP3 (no video, no subtitles) |
-| `-j`, `--jellyfin`        | Shortcut for `--sidecar --append-channel --keep-id --yes` |
-| `-s`, `--sidecar`         | Save `.info.json` and thumbnail alongside each video |
-| `-p`, `--posters-only`    | Download folder poster images only, no videos |
-| `-m`, `--max N`           | Stop after N videos per playlist (useful for testing) |
-| `--prefix-index`          | Prefix playlist index to filename: `001 - Title.mp4` |
-| `--postfix-index`         | Postfix playlist index to filename: `Title - 001.mp4` |
-| `--append-channel`        | Append channel name to title (if not already present) |
-| `--keep-id`               | Keep `[VideoID]` at end of filename |
-| `-o`, `--output DIR`      | Save files into `DIR` (default: current directory, or channel name for channel URLs) |
-| `-c`, `--cookies FILE`    | Use a Netscape `cookies.txt` file for authentication |
-| `-b`, `--browser BROWSER` | Use cookies from browser: `chrome`, `firefox`, `safari`, `edge` |
-| `-h`, `--help`            | Show usage |
+| `-u`, `--update`          | Update yt-dlp and deno before running (URL optional)                                                   |
+| `-a`, `--audio`           | Download audio only as MP3 (no video, no subtitles)                                                    |
+| `-j`, `--jellyfin`        | Shortcut for `--sidecar --append-channel --keep-id --yes --cleanup`                                    |
+| `-s`, `--sidecar`         | Save `.info.json` and thumbnail alongside each video                                                   |
+| `-p`, `--posters-only`    | Download folder poster images only, no videos                                                          |
+| `-m`, `--max N`           | Stop after N videos per playlist (useful for testing)                                                  |
+| `--prefix-index`          | Prefix playlist index to filename: `001 - Title.mp4`                                                   |
+| `--postfix-index`         | Postfix playlist index to filename: `Title - 001.mp4`                                                  |
+| `--append-channel`        | Append channel name to title (if not already present)                                                  |
+| `--keep-id`               | Keep `[VideoID]` at end of filename                                                                    |
+| `-o`, `--output DIR`      | Save files into `DIR` (default: current directory, or channel name for channel URLs)                   |
+| `-l`, `--log DIR`         | Write log to `DIR/yt-download-TIMESTAMP.log` (default: current directory)                              |
+| `--cleanup`               | Remove empty playlist folders after download (no media files AND under 2MB)                            |
+| `-c`, `--cookies FILE`    | Use a Netscape `cookies.txt` file for authentication                                                   |
+| `-b`, `--browser BROWSER` | Use cookies from browser: `chrome`, `firefox`, `safari`, `edge`                                        |
+| `-h`, `--help`            | Show usage                                                                                             |
 
 ### Examples
 
@@ -151,6 +155,23 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ./yt-download.sh --posters-only --browser firefox "https://www.youtube.com/@BedtimeHistory"
 ```
 
+**Write a log file:**
+```bash
+./yt-download.sh --jellyfin --log ~/logs "https://www.youtube.com/@BedtimeHistory"
+# Writes ~/logs/yt-download-20260516-143022.log
+```
+
+**Download and clean up empty playlist folders afterwards:**
+```bash
+./yt-download.sh --jellyfin --cleanup "https://www.youtube.com/@BedtimeHistory"
+```
+
+A folder is only removed if **both** conditions are true:
+- Contains no media files (`.mp4`, `.mkv`, `.webm`, `.m4a`, `.mp3`, `.opus`)
+- Is under 2MB total — safety net to prevent accidental deletion of folders with videos, songs, or ebooks
+
+A folder containing only `poster.jpg` and `season.nfo` (typically a few hundred KB) will be removed.
+A folder with any media file, or anything over 2MB, is left untouched regardless.
 **Update yt-dlp and deno only:**
 ```bash
 ./yt-download.sh --update
@@ -182,7 +203,7 @@ It combines several flags into one: --sidecar, --append-channel, --keep-id, and 
 ```
 
 This single command:
-- Downloads all playlists without prompting
+- Downloads all playlists, videos, and shorts without prompting
 - Saves `.info.json` and `.jpg` sidecar files alongside each video
 - Appends the channel name to each video title (with deduplication)
 - Keeps `[VideoID]` in each filename for reliable Jellyfin matching
@@ -197,11 +218,19 @@ If you get authentication error, you might need to sign into YouTube in your bro
 ```
 See **Authentication (Sign-in / Bot Detection)** below for details.
 
+
+**Fixing up an existing download:**
+```bash
+./yt-rename.sh --jellyfin --all ~/Videos
+./yt-nfo.sh --all ~/Videos
+./yt-download.sh --posters-only --yes "https://www.youtube.com/@BedtimeHistory"
+```
+
 ---
 
 ## yt-rename.sh
 
-Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` prefix and optionally adding index, channel name, and VideoID. Reads metadata from the `.info.json` sidecar. Renames all companion files (`.info.json`, `.jpg`, `.srt`) together.
+Renames YouTube sidecar files using metadata from `.info.json`. Handles both Jellyfin-style (`Channel - Date - Title [VideoID]`) and clean (`Title [VideoID]`) filenames. Strips the `Channel - Date -` prefix if present, and optionally adds index, channel name, and VideoID. Renames all companion files (`.info.json`, `.jpg`, `.srt`) together.
 
 ### Usage
 
@@ -219,6 +248,8 @@ Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` pref
 | `--postfix-index` | Postfix episode number: `Title - 001.mp4` |
 | `--append-channel` | Append channel name if not already in title |
 | `--keep-id` | Keep `[VideoID]` at end of filename |
+| `--jellyfin` | Shortcut for `--append-channel --keep-id` (clears any index flags) |
+| `-l`, `--log DIR` | Write log to `DIR/yt-rename-TIMESTAMP.log` (default: current directory) |
 | `-h`, `--help` | Show usage |
 
 ### Examples
@@ -227,21 +258,25 @@ Renames files downloaded with `--sidecar`, stripping the `Channel - Date -` pref
 # Preview what would change
 ./yt-rename.sh --dry-run ./BedtimeHistory
 
-# Process all channels in a folder at once
-./yt-rename.sh --append-channel --keep-id --all ~/Videos
-./yt-rename.sh --append-channel --keep-id --all .    # current directory
+# Jellyfin-ready rename (append channel + keep VideoID)
+./yt-rename.sh --jellyfin ./BedtimeHistory
+# "Bedtime History - 20251128 - Henry Hudson's Journey Made Easy [6748DOW_Xps].mp4"
+# -> "Henry Hudson's Journey Made Easy - Bedtime History [6748DOW_Xps].mp4"
 
-# Strip Channel/Date prefix, keep VideoID
+# Also works on already-clean filenames (Title [VideoID].mp4)
+# -> "Title - Bedtime History [VideoID].mp4"
+
+# Process all channels in a folder at once
+./yt-rename.sh --jellyfin --all ~/Videos
+./yt-rename.sh --jellyfin --all .    # current directory
+
+# Strip Channel/Date prefix, keep VideoID (without appending channel)
 ./yt-rename.sh --keep-id ./BedtimeHistory
 # "Bedtime History - 20251128 - Henry Hudson's Journey Made Easy [6748DOW_Xps].mp4"
 # -> "Henry Hudson's Journey Made Easy [6748DOW_Xps].mp4"
-
-# Full Jellyfin-friendly rename with channel appended
-./yt-rename.sh --append-channel --keep-id ./BedtimeHistory
-# -> "Henry Hudson's Journey Made Easy - Bedtime History [6748DOW_Xps].mp4"
 ```
 
-> **Note:** `--append-channel` skips appending if the channel name is already present in the title (case-insensitive).
+> **Note:** `--append-channel` and `--jellyfin` skip appending if the channel name is already present in the title (case-insensitive). Both the Jellyfin-style `Channel - Date - Title [VideoID]` format and the clean `Title [VideoID]` format are supported.
 
 ---
 
@@ -266,6 +301,7 @@ Without these files, Jellyfin infers season numbers from `playlist_index` in the
 | `-n`, `--dry-run` | Show what would be written without doing anything |
 | `-f`, `--force` | Overwrite existing `.nfo` files (use after adding new playlists) |
 | `-a`, `--all` | Process every subfolder in `DIR` as a separate channel |
+| `-l`, `--log DIR` | Write log to `DIR/yt-nfo-TIMESTAMP.log` (default: current directory) |
 | `-h`, `--help` | Show usage |
 
 ### Examples

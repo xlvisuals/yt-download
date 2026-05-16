@@ -30,6 +30,7 @@ Options:
   -n, --dry-run    Show what would be written without doing anything
   -f, --force      Overwrite existing .nfo files
   -a, --all        Process every subfolder in DIR as a separate channel
+  -l, --log DIR      Write log to DIR/yt-nfo-TIMESTAMP.log (default: current dir)
   -h, --help       Show this help
 
 Examples:
@@ -44,6 +45,7 @@ EOF
 
 # --- Parse arguments ---
 DRY_RUN=false
+LOG_DIR=""
 FORCE=false
 ALL=false
 TARGET_DIR=""
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         -n|--dry-run) DRY_RUN=true;  shift ;;
         -f|--force)   FORCE=true;    shift ;;
         -a|--all)     ALL=true;      shift ;;
+        -l|--log)     LOG_DIR="$2";  shift 2 ;;
         -h|--help)    usage 0 ;;
         -*)           echo "Unknown option: $1" >&2; usage 1 ;;
         *)            TARGET_DIR="$1"; shift ;;
@@ -69,7 +72,13 @@ if [[ "$ALL" == true ]]; then
     while IFS= read -r -d "" subdir; do
         info "Processing channel: $(basename "$subdir")"
         extra_flags=""
-        [[ "$DRY_RUN" == true ]] && extra_flags="$extra_flags --dry-run"
+        LOG_DIR="${LOG_DIR:-.}"
+mkdir -p "$LOG_DIR" || die "Cannot create log directory: $LOG_DIR"
+LOG_FILE="${LOG_DIR}/yt-nfo-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+info "Logging to: $LOG_FILE"
+
+[[ "$DRY_RUN" == true ]] && extra_flags="$extra_flags --dry-run"
         [[ "$FORCE"   == true ]] && extra_flags="$extra_flags --force"
         # shellcheck disable=SC2086
         bash "$0" $extra_flags "$subdir"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yt-download.sh -- Download YouTube videos, playlists, and channels
 #
-# Version:   2026-05-15
+# Version:   2026-05-16
 # License:   MIT <https://spdx.org/licenses/MIT.html>
 # Copyright: 2026 Axel Busch
 #
@@ -27,6 +27,8 @@
 #   -o, --output DIR   Save files into DIR (default: current directory,
 #                      or channel name for channel URLs)
 #   -m, --max N        Stop after N videos per playlist (useful for testing)
+#   -l, --log DIR      Write log to DIR/yt-download-TIMESTAMP.log (default: current directory)
+#   --cleanup          Remove playlist folders with no media files after download
 #   -c, --cookies FILE Use a Netscape cookies.txt file for authentication
 #   -b, --browser BR   Use cookies from browser (chrome, firefox, safari, edge)
 #   -h, --help         Show usage
@@ -195,12 +197,13 @@ fi
 # Windows-style paths (C:\...) for its own arguments (e.g. --ffmpeg-location).
 # However YTDLP_BIN itself must stay as a Unix path so bash can execute it.
 SCRIPT_DIR_WIN=""
+DENO_BIN_EXEC="$DENO_BIN"  # Cygwin/Unix path for executing deno directly in bash
 if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && command -v cygpath &>/dev/null; then
     SCRIPT_DIR_WIN="$(cygpath -w "$SCRIPT_DIR")"
     # FFMPEG_BIN and DENO_BIN are passed as arguments to yt-dlp.exe -- Windows paths needed
     [[ -n "$FFMPEG_BIN" ]] && FFMPEG_BIN="${SCRIPT_DIR_WIN}\\${FFMPEG_LOCAL}"
     [[ -n "$DENO_BIN" ]]   && DENO_BIN="${SCRIPT_DIR_WIN}\\${DENO_LOCAL}"
-    # YTDLP_BIN stays as a Unix/Cygwin path -- bash needs it that way to execute it
+    # YTDLP_BIN and DENO_BIN_EXEC stay as Unix/Cygwin paths -- bash needs them to execute
 fi
 
 # ─────────────────────────────────────────────
@@ -221,6 +224,8 @@ MAX_DOWNLOADS=""
 BASE_URL=""
 ENDPOINTS=()
 BASE_CHANNEL_URL=""
+LOG_DIR=""
+CLEANUP=false
 
 usage() {
     cat <<EOF
@@ -236,9 +241,11 @@ Options:
   --postfix-index    Postfix playlist index: Title - 001.mp4
   --append-channel   Append channel name to title (if not already present)
   --keep-id          Keep [VideoID] at end of filename
-  -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes
+  -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes --cleanup
   -o, --output DIR   Save files into DIR  (default: current directory)
   -m, --max N        Stop after N videos per playlist (useful for testing)
+  -l, --log DIR      Write log to DIR/yt-download-TIMESTAMP.log (default: current dir)
+  --cleanup          Remove playlist folders containing no media files after download
   -c, --cookies FILE Use a cookies.txt file for authentication
   -b, --browser BROWSER  Use cookies from browser (chrome, firefox, safari, edge)
   -h, --help         Show this help
@@ -257,7 +264,7 @@ while [[ $# -gt 0 ]]; do
         -u|--update) DO_UPDATE=true;  shift ;;
         -a|--audio)        AUDIO_ONLY=true;        shift ;;
         -s|--sidecar)      SIDECAR=true;           shift ;;
-        -j|--jellyfin)     SIDECAR=true; APPEND_CHANNEL=true; KEEP_ID=true; FORCE_YES=true; shift ;;
+        -j|--jellyfin)     SIDECAR=true; APPEND_CHANNEL=true; KEEP_ID=true; FORCE_YES=true; CLEANUP=true; shift ;;
         -p|--posters-only)      POSTERS_ONLY=true;      shift ;;
         --prefix-index)    INDEX_MODE="prefix";    shift ;;
         --postfix-index)   INDEX_MODE="postfix";   shift ;;
@@ -265,6 +272,8 @@ while [[ $# -gt 0 ]]; do
         --keep-id)         KEEP_ID=true;           shift ;;
         -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
         -m|--max)    MAX_DOWNLOADS="$2"; shift 2 ;;
+        -l|--log)    LOG_DIR="$2";           shift 2 ;;
+        --cleanup)   CLEANUP=true;            shift ;;
         -c|--cookies) COOKIES_FILE="$2"; shift 2 ;;
         -b|--browser) COOKIES_FROM_BROWSER="$2"; shift 2 ;;
         -h|--help)   usage 0 ;;
@@ -277,6 +286,26 @@ done
 if [[ -z "$BASE_URL" ]]; then
     [[ "$DO_UPDATE" == true ]] || usage 1
 fi
+
+# -- 2b. Set up logging --
+LOG_DIR="${LOG_DIR:-.}"
+mkdir -p "$LOG_DIR" || die "Cannot create log directory: $LOG_DIR"
+LOG_FILE="${LOG_DIR}/yt-download-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+info "Logging to: $LOG_FILE"
+
+# -- 2c. Register exit trap for post-download tasks --
+_POST_DOWNLOAD_DONE=false
+post_download() {
+    [[ "$_POST_DOWNLOAD_DONE" == true ]] && return
+    _POST_DOWNLOAD_DONE=true
+    [[ "${SIDECAR:-false}" != true ]] && return
+    [[ -z "${OUT_PREFIX:-}" ]] && return
+    write_nfo_files "$OUT_PREFIX" 2>/dev/null || true
+    fetch_posters "$OUT_PREFIX" 2>/dev/null || true
+}
+trap post_download EXIT
+
 
 # -- 3. Check / download yt-dlp --
 if [[ ! -x "$YTDLP_BIN" ]]; then
@@ -297,13 +326,13 @@ if [[ "$DO_UPDATE" == true ]]; then
 
     # Update bundled deno if present; skip if deno is a system install on PATH
     # (system deno should be updated via its own package manager)
-    if [[ -n "$DENO_BIN" && -f "$DENO_BIN" ]]; then
-        info "Updating bundled deno at ${DENO_BIN}..."
-        if [[ -w "$DENO_BIN" ]]; then
+    if [[ -n "$DENO_BIN_EXEC" && -f "$DENO_BIN_EXEC" ]]; then
+        info "Updating bundled deno at ${DENO_BIN_EXEC}..."
+        if [[ -w "$DENO_BIN_EXEC" ]]; then
             # deno upgrade replaces itself in-place by default
-            "$DENO_BIN" upgrade --output "$DENO_BIN" || true
+            "$DENO_BIN_EXEC" upgrade --output "$DENO_BIN_EXEC" || true
         else
-            info "Cannot update deno: $DENO_BIN is not writable -- skipping"
+            info "Cannot update deno: $DENO_BIN_EXEC is not writable -- skipping"
         fi
     fi
 
@@ -431,6 +460,7 @@ fetch_posters() {
         "--write-thumbnail"
         "--convert-thumbnails" "jpg"
         "--no-overwrites"
+        "--no-post-overwrites"
         "--windows-filenames"
         "--no-part"
         "--quiet"
@@ -450,52 +480,75 @@ fetch_posters() {
     fi
     [[ -n "${DENO_BIN:-}" ]] && POSTER_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
 
-    # Fetch playlist posters
-    for url in "${urls[@]}"; do
-        info "Fetching poster: $url"
-        set +e
-        "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$url" 2>&1
-        set -e
-    done
+    # Build a map of playlist_title -> playlist_url in one yt-dlp call,
+    # then only fetch posters for playlists whose folder already exists locally.
+    if [[ -n "$out_prefix" && -d "${out_prefix%/}" ]]; then
+        info "Building playlist map..."
+        local playlist_map
+        playlist_map="$("$YTDLP_BIN" \
+            --flat-playlist \
+            --print "playlist_title=%(title)s ; playlist_url=%(url)s" \
+            --quiet --no-warnings \
+            "$BASE_URL" 2>/dev/null || true)"
+
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local pl_title pl_url
+            pl_title="${line#playlist_title=}"
+            pl_title="${pl_title% ; playlist_url=*}"
+            pl_url="${line##*; playlist_url=}"
+            local pl_dir="${out_prefix%/}/${pl_title}"
+            if [[ ! -d "$pl_dir" ]]; then
+                echo "  Skipping $pl_title (playlist not downloaded)"
+                continue
+            fi
+            if [[ -f "${pl_dir}/poster.jpg" ]]; then
+                echo "  Skipping $pl_title (poster already downloaded)"
+                continue
+            fi
+            echo "  Fetching poster for $pl_title"
+            set +e
+            "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$pl_url" 2>&1
+            set -e
+        done <<< "$playlist_map"
+    else
+        # No out_prefix -- iterate URLs directly
+        for url in "${urls[@]}"; do
+            info "Fetching poster: $url"
+            set +e
+            "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$url" 2>&1
+            set -e
+        done
+    fi
 
     # Fetch channel-level poster.jpg if we have a channel output directory
     if [[ -n "$out_prefix" ]]; then
-        local channel_dir
-        channel_dir="$(cd "${out_prefix%/}" && pwd)"  # absolute path avoids yt-dlp appending channel name
+        local channel_dir="${out_prefix%/}"
+        [[ ! -d "$channel_dir" ]] && return  # skip if channel folder not yet created
+        channel_dir="$(cd "$channel_dir" && pwd)"  # absolute path avoids yt-dlp appending channel name
         local channel_poster="${channel_dir}/poster.jpg"
         if [[ ! -f "$channel_poster" ]]; then
             info "Fetching channel poster..."
             local _tmp="${BASE_URL#*/@}"
             local _handle="${_tmp%%/*}"
             local channel_url="https://www.youtube.com/@${_handle}"
-            # Build opts without --flat-playlist for the channel page
-            local CHANNEL_POSTER_OPTS=()
-            local opt
-            for opt in "${POSTER_OPTS[@]}"; do
-                [[ "$opt" == "--flat-playlist" ]] && continue
-                CHANNEL_POSTER_OPTS+=("$opt")
-            done
-            # Use a temp filename then rename to poster.jpg to avoid any
-            # path construction yt-dlp might do with the channel name
-            local tmp_poster="${channel_dir}/.poster_tmp.%(ext)s"
             set +e
             "$YTDLP_BIN" \
                 "--skip-download" \
                 "--write-thumbnail" \
                 "--convert-thumbnails" "jpg" \
-                "--no-overwrites" \
                 "--playlist-items" "0" \
                 "--quiet" \
-                "-o" "thumbnail:${tmp_poster}" \
-                "${CHANNEL_POSTER_OPTS[@]}" \
+                "-o" "${channel_poster}" \
                 "$channel_url" 2>&1
             set -e
-            # yt-dlp writes the channel poster into a subfolder with the channel name.
-            # Move it to the proper location and remove the extra folder
-            local channel_poster_tmp_folder="${channel_dir}/${CHANNEL_NAME}"
-            local channel_poster_tmp_file="${channel_poster_tmp_folder}/poster.jpg"
-            [[ -f "$channel_poster_tmp_file" ]] && mv "$channel_poster_tmp_file" "$channel_poster"
-            [[ -d "$channel_poster_tmp_folder" ]] && rm -rf "$channel_poster_tmp_folder"
+            if [[ -n "$channel_poster" ]]; then
+                info "Written channel poster: $channel_poster"
+            else
+                info "Could not fetch channel poster for $channel_url. Attempted to write to '$channel_poster'"
+            fi
+        else
+            info "Channel poster already present at '$channel_poster'."
         fi
     fi
 }
@@ -575,7 +628,7 @@ fi
 # If a supported JS runtime is available, let yt-dlp use its full default client
 # list (which includes JS-dependent clients for best quality).
 # Prefer bundled deno, then system deno/node/phantomjs, then fall back to limited clients.
-if [[ -n "$DENO_BIN" ]]; then
+if [[ -n "$DENO_BIN_EXEC" ]]; then
     info "Using bundled deno for yt-dlp JS support"
     BASE_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
 elif command -v deno &>/dev/null || command -v node &>/dev/null || command -v phantomjs &>/dev/null; then
@@ -605,6 +658,7 @@ fi
 # Write tvshow.nfo and season.nfo files for Jellyfin.
 # Called once after all downloads complete when --sidecar is set.
 write_nfo_files() {
+    info "Writing .nfo files..."
     local out_prefix="$1"
     local root_dir="${out_prefix%/}"
     [[ -z "$root_dir" ]] && root_dir="."
@@ -616,7 +670,7 @@ write_nfo_files() {
         show_title="$(basename "$root_dir")"
         printf '<?xml version="1.0" encoding="utf-8"?>\n<tvshow>\n  <title>%s</title>\n</tvshow>\n' \
             "$show_title" > "$tvshow_nfo"
-        info "Written: $tvshow_nfo"
+        echo "Written: $tvshow_nfo"
     fi
 
 
@@ -634,7 +688,7 @@ write_nfo_files() {
         playlist_title="$(basename "$playlist_dir")"
         printf '<?xml version="1.0" encoding="utf-8"?>\n<season>\n  <title>%s</title>\n  <seasonnumber>%d</seasonnumber>\n</season>\n' \
             "$playlist_title" "$season_num" > "${playlist_dir}/season.nfo"
-        info "Written: ${playlist_dir}/season.nfo (Season ${season_num}: ${playlist_title})"
+        echo "Written: ${playlist_dir}/season.nfo (Season ${season_num}: ${playlist_title})"
     done < <(find "$root_dir" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 }
 
@@ -700,6 +754,33 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
         check_dir="${check_dir%/}"
         [[ -z "$check_dir" ]] && check_dir="."
         check_disk_space "$check_dir" 100
+
+        # Build a temporary download archive from existing [VideoID] filenames
+        # so yt-dlp skips already-downloaded videos without fetching their pages.
+        # Only applies when --keep-id is set (VideoID must be in filename).
+        # Skipped entirely if the output folder is empty or doesn't exist.
+        local tmp_archive=""
+        if [[ "$KEEP_ID" == true && -d "$check_dir" ]]; then
+            local existing_ids
+            existing_ids="$(find "$check_dir" -maxdepth 2 -name "*\[*\]*" 2>/dev/null \
+                | grep -oE "\[[A-Za-z0-9_-]+\]" \
+                | tr -d "[]" \
+                | sort -u)"
+            if [[ -n "$existing_ids" ]]; then
+                tmp_archive="$(mktemp /tmp/yt-archive-XXXXXX.txt)"
+                echo "$existing_ids" | sed "s/^/youtube /" > "$tmp_archive"
+                local id_count
+                id_count="$(echo "$existing_ids" | wc -l | tr -d " ")"
+                # On Cygwin, convert path to Windows format for yt-dlp.exe
+                local tmp_archive_arg="$tmp_archive"
+                if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && command -v cygpath &>/dev/null; then
+                    tmp_archive_arg="$(cygpath -w "$tmp_archive")"
+                fi
+                info "Skipping $id_count already-downloaded video(s)"
+                OPTS+=("--download-archive" "$tmp_archive_arg")
+            fi
+        fi
+
         info "Processing: $url"
         local ytdlp_out
         ytdlp_out="$(mktemp)"
@@ -708,9 +789,9 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
             | tee "$ytdlp_out"
         local ytdlp_exit="${PIPESTATUS[0]}"
         set -e
-        if grep -q "Sign in to confirm" "$ytdlp_out" 2>/dev/null; then
+        if grep -qE "Sign in to confirm|cookies are no longer valid" "$ytdlp_out" 2>/dev/null; then
             rm -f "$ytdlp_out"
-            die "YouTube requires sign-in. Use -b BROWSER or -c cookies.txt"
+            die "YouTube authentication failed -- your cookies have expired. Re-export them with -b BROWSER or -c cookies.txt"
         fi
 
         # Exit code 1 with no bot error means some videos were skipped (private/unavailable)
@@ -721,11 +802,15 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
             die "yt-dlp exited with error code $ytdlp_exit -- aborting"
         fi
         rm -f "$ytdlp_out"
+        [[ -n "$tmp_archive" ]] && rm -f "$tmp_archive"
     done
 }
 
 # Avoid .part files -- write directly to final filename
 BASE_OPTS+=("--no-part")
+
+# Suppress download progress bars in output (cleaner logs)
+BASE_OPTS+=("--no-progress")
 
 # Skip files that already exist
 BASE_OPTS+=("--no-overwrites")
@@ -746,14 +831,34 @@ if [[ -n "${ENDPOINTS[*]+x}" && ${#ENDPOINTS[@]} -gt 1 ]]; then
     done
 fi
 
-# Write Jellyfin nfo files once after all downloads are complete
-if [[ "$SIDECAR" == true ]]; then
-    write_nfo_files "$OUT_PREFIX"
-
-    # Fetch playlist poster images via a separate flat-playlist pass.
-    # This is the same approach as --posters-only and correctly retrieves
-    # the playlist thumbnail (pl_thumbnail) without conflicting with
-    # --no-write-playlist-metafiles used during the main download.
-    info "Fetching playlist and channel poster images..."
-    fetch_posters "$OUT_PREFIX"
+# -- Cleanup: remove playlist folders with no media files and under size threshold --
+if [[ "$CLEANUP" == true ]]; then
+    info "Running cleanup -- removing folders with no media files (must be < 2MB)..."
+    cleanup_dir="${OUT_PREFIX:-.}"
+    cleanup_dir="${cleanup_dir%/}"
+    [[ -z "$cleanup_dir" ]] && cleanup_dir="."
+    CLEANUP_SIZE_LIMIT=2097152  # 2MB in bytes -- safety net against accidental deletion
+    removed=0
+    while IFS= read -r -d "" dir; do
+        [[ ! -d "$dir" ]] && continue
+        # Safety check: skip if folder exceeds size limit
+        dir_size="$(du -sb "$dir" 2>/dev/null | awk "{print \$1}" || echo 0)"
+        if [[ "$dir_size" -ge "$CLEANUP_SIZE_LIMIT" ]]; then
+            continue
+        fi
+        # Check for any media files
+        if ! find "$dir" -maxdepth 1 \
+                \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \
+                   -o -name "*.m4a" -o -name "*.mp3" -o -name "*.opus" \) \
+                -print -quit 2>/dev/null | grep -q .; then
+            info "Removing folder (no media, $(numfmt --to=iec "$dir_size" 2>/dev/null || echo "${dir_size}B")): $dir"
+            rm -rf "$dir"
+            (( removed++ )) || true
+        fi
+    done < <(find "$cleanup_dir" -mindepth 1 -maxdepth 2 -type d -print0 | sort -rz)
+    info "Cleanup done. Removed $removed folder(s)."
 fi
+
+# Run post-download tasks (nfo files + posters).
+# Also called by the exit trap on error, so always runs.
+post_download
