@@ -140,7 +140,9 @@ fetch() {   # fetch <url> <dest>
     fi
 }
 
+
 # -- 1. Detect platform and binary name --
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
@@ -206,9 +208,9 @@ if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && command -v cyg
     # YTDLP_BIN and DENO_BIN_EXEC stay as Unix/Cygwin paths -- bash needs them to execute
 fi
 
-# ─────────────────────────────────────────────
-# 2. Parse arguments  (order-independent flags)
-# ─────────────────────────────────────────────
+
+# -- 2. Parse arguments  (order-independent flags) --
+
 FORCE_YES=false
 DO_UPDATE=false
 AUDIO_ONLY=false
@@ -287,14 +289,18 @@ if [[ -z "$BASE_URL" ]]; then
     [[ "$DO_UPDATE" == true ]] || usage 1
 fi
 
-# -- 2b. Set up logging --
+
+# -- 3. Set up logging --
+
 LOG_DIR="${LOG_DIR:-.}"
 mkdir -p "$LOG_DIR" || die "Cannot create log directory: $LOG_DIR"
 LOG_FILE="${LOG_DIR}/yt-download-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 info "Logging to: $LOG_FILE"
 
-# -- 2c. Register exit trap for post-download tasks --
+
+# -- 4. Register exit trap for post-download tasks --
+
 _POST_DOWNLOAD_DONE=false
 post_download() {
     [[ "$_POST_DOWNLOAD_DONE" == true ]] && return
@@ -307,219 +313,12 @@ post_download() {
 trap post_download EXIT
 
 
-# -- 3. Check / download yt-dlp --
-if [[ ! -x "$YTDLP_BIN" ]]; then
-    info "yt-dlp not found. Downloading from GitHub..."
-    DL_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/${BINARY}"
-    fetch "$DL_URL" "$YTDLP_BIN"
-    chmod +x "$YTDLP_BIN"
-    info "Saved to $YTDLP_BIN"
-fi
-
-if [[ "$DO_UPDATE" == true ]]; then
-    info "Updating yt-dlp at ${YTDLP_BIN}..."
-    if [[ -w "$YTDLP_BIN" ]]; then
-        "$YTDLP_BIN" -U
-    else
-        die "Cannot update: $YTDLP_BIN is not writable. Try running with sudo, or update the bundle manually."
-    fi
-
-    # Update bundled deno if present; skip if deno is a system install on PATH
-    # (system deno should be updated via its own package manager)
-    if [[ -n "$DENO_BIN_EXEC" && -f "$DENO_BIN_EXEC" ]]; then
-        info "Updating bundled deno at ${DENO_BIN_EXEC}..."
-        if [[ -w "$DENO_BIN_EXEC" ]]; then
-            # deno upgrade replaces itself in-place by default
-            "$DENO_BIN_EXEC" upgrade --output "$DENO_BIN_EXEC" || true
-        else
-            info "Cannot update deno: $DENO_BIN_EXEC is not writable -- skipping"
-        fi
-    fi
-
-    # If no URL was given, update-only mode -- exit cleanly after updating
-    [[ -z "$BASE_URL" ]] && exit 0
-fi
-
-# -- 4. Resolve output directory --
-if [[ -n "$OUTPUT_DIR" ]]; then
-    mkdir -p "$OUTPUT_DIR" || die "Cannot create output directory: $OUTPUT_DIR"
-    OUT_PREFIX="${OUTPUT_DIR}/"
-elif [[ "$BASE_URL" == *"/@"* || "$BASE_URL" == */channel/* || "$BASE_URL" == */user/* ]]; then
-    # Looks like a channel page -- try to extract the channel name
-    CHANNEL_NAME=""
-
-    if [[ "$BASE_URL" == *"/@"* ]]; then
-        # /@ChannelName/... -- name is right there in the URL, no extra yt-dlp call needed
-        CHANNEL_NAME="$(echo "$BASE_URL" | sed 's|.*/@||; s|/.*||')"
-        # If URL has no path after the channel handle, prompt for what to download
-        if [[ "$BASE_URL" =~ ^https://www\.youtube\.com/@[^/]+/?$ ]]; then
-            CHANNEL_HANDLE="${BASE_URL%/}"
-            CHANNEL_HANDLE="${CHANNEL_HANDLE##*/}"  # just @Name
-            BASE_CHANNEL_URL="${BASE_URL%/}"
-            # Build list of endpoints to download
-            ENDPOINTS=()
-            if [[ "$FORCE_YES" == true ]]; then
-                ENDPOINTS=("playlists" "videos" "shorts")
-            else
-                for endpoint in playlists videos shorts; do
-                    read_tty _ans "Download ${endpoint} from ${CHANNEL_HANDLE}? (y/n): "
-                    [[ "$_ans" =~ ^[yY]$ ]] && ENDPOINTS+=("$endpoint")
-                done
-            fi
-            [[ ${#ENDPOINTS[@]} -eq 0 ]] && { echo "Nothing selected. Bye."; exit 0; }
-            # Set BASE_URL to first endpoint; remaining handled after main loop
-            BASE_URL="${BASE_CHANNEL_URL}/${ENDPOINTS[0]}"
-            info "Will download: ${ENDPOINTS[*]}"
-        fi
-    else
-        # /channel/UCxxx or /user/Name -- ask yt-dlp for the uploader name
-        info "Detecting channel name..."
-        CHANNEL_NAME="$("$YTDLP_BIN" --flat-playlist --playlist-items 1 --print uploader "$BASE_URL" 2>/dev/null | head -1)"
-    fi
-
-    if [[ -n "$CHANNEL_NAME" && "$CHANNEL_NAME" != "NA" ]]; then
-        CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
-        info "Using channel name as output directory: $CHANNEL_NAME"
-        mkdir -p "$CHANNEL_NAME" || die "Cannot create output directory: $CHANNEL_NAME"
-        OUT_PREFIX="${CHANNEL_NAME}/"
-    else
-        info "Could not detect channel name -- saving to current directory"
-        OUT_PREFIX=""
-    fi
-else
-    OUT_PREFIX=""
-fi
-
-# -- 5. Fetch playlist list --
-# For channel pages, expand into individual playlist URLs.
-# For direct playlist or video URLs, use as-is -- the flat-playlist
-# expansion would incorrectly treat video IDs as playlist IDs.
-info "Fetching content from $BASE_URL"
-
-urls=()
-
-if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
-      "$BASE_URL" == *"youtube.com/watch?"* || \
-      "$BASE_URL" == *"youtu.be/"* || \
-      "$BASE_URL" == *"/@"*"/videos" || \
-      "$BASE_URL" == *"/@"*"/shorts" ]]; then
-    # Direct playlist, video, /videos or /shorts URL -- use as-is, no expansion needed
-    urls=("$BASE_URL")
-else
-    # Channel or other page -- expand into list of playlist URLs
-    stderr_tmp="$(mktemp)"
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && urls+=("$line")
-    done < <(
-        "$YTDLP_BIN" \
-            --flat-playlist \
-            --print "https://www.youtube.com/playlist?list=%(id)s" \
-            "$BASE_URL" 2>"$stderr_tmp"
-    )
-
-    if [[ ${#urls[@]} -eq 0 ]]; then
-        if grep -qi "error\|failed\|unable" "$stderr_tmp" 2>/dev/null; then
-            cat "$stderr_tmp" >&2
-            rm -f "$stderr_tmp"
-            die "yt-dlp reported an error while fetching '$BASE_URL'. Check the URL and your connection."
-        fi
-        # Nothing found -- fall back to using the URL directly
-        urls=("$BASE_URL")
-    fi
-    rm -f "$stderr_tmp"
-fi
-
-[[ ${#urls[@]} -eq 0 || -z "${urls[0]}" ]] && die "No valid URLs found for '$BASE_URL'."
-
-
-# -- 6. Confirm to proceed if more than one URL --
-
-
-proceed=""
-if [[ "$FORCE_YES" == true || ${#urls[@]} -eq 1 ]]; then
-    echo "Found ${#urls[@]} url(s)."
-    proceed="y"
-else
-    read_tty proceed "Found ${#urls[@]} urls. Proceed? (y/n): "
-fi
-
-if [[ ! "$proceed" =~ ^[yY]$ ]]; then
-    echo "Bye"
-    exit 0
-fi
-
+# -- 5. Define Functions --
 
 # Fetch playlist and channel poster images for Jellyfin.
 # Called from --posters-only mode and after --sidecar downloads.
 fetch_posters() {
     local out_prefix="$1"  # e.g. "ChannelName/" or ""
-
-    # Build poster fetch opts
-    local POSTER_OPTS=(
-        "--flat-playlist"
-        "--write-thumbnail"
-        "--convert-thumbnails" "jpg"
-        "--no-overwrites"
-        "--no-post-overwrites"
-        "--windows-filenames"
-        "--no-part"
-        "--quiet"
-        "--no-warnings"
-        "--extractor-args" "youtubetab:skip=authcheck"
-        "-o" "thumbnail:"
-        "-o" "pl_thumbnail:${out_prefix}%(playlist_title)s/poster.%(ext)s"
-    )
-    [[ -n "$COOKIES_FILE" ]]         && POSTER_OPTS+=("--cookies" "$COOKIES_FILE")
-    [[ -n "$COOKIES_FROM_BROWSER" ]] && POSTER_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
-    if [[ -n "${FFMPEG_BIN:-}" ]]; then
-        if [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
-            POSTER_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
-        else
-            POSTER_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
-        fi
-    fi
-    [[ -n "${DENO_BIN:-}" ]] && POSTER_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
-
-    # Build a map of playlist_title -> playlist_url in one yt-dlp call,
-    # then only fetch posters for playlists whose folder already exists locally.
-    if [[ -n "$out_prefix" && -d "${out_prefix%/}" ]]; then
-        info "Building playlist map..."
-        local playlist_map
-        playlist_map="$("$YTDLP_BIN" \
-            --flat-playlist \
-            --print "playlist_title=%(title)s ; playlist_url=%(url)s" \
-            --quiet --no-warnings \
-            "$BASE_URL" 2>/dev/null || true)"
-
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            local pl_title pl_url
-            pl_title="${line#playlist_title=}"
-            pl_title="${pl_title% ; playlist_url=*}"
-            pl_url="${line##*; playlist_url=}"
-            local pl_dir="${out_prefix%/}/${pl_title}"
-            if [[ ! -d "$pl_dir" ]]; then
-                echo "  Skipping $pl_title (playlist not downloaded)"
-                continue
-            fi
-            if [[ -f "${pl_dir}/poster.jpg" ]]; then
-                echo "  Skipping $pl_title (poster already downloaded)"
-                continue
-            fi
-            echo "  Fetching poster for $pl_title"
-            set +e
-            "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$pl_url" 2>&1
-            set -e
-        done <<< "$playlist_map"
-    else
-        # No out_prefix -- iterate URLs directly
-        for url in "${urls[@]}"; do
-            info "Fetching poster: $url"
-            set +e
-            "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$url" 2>&1
-            set -e
-        done
-    fi
 
     # Fetch channel-level poster.jpg if we have a channel output directory
     if [[ -n "$out_prefix" ]]; then
@@ -542,7 +341,7 @@ fetch_posters() {
                 "-o" "${channel_poster}" \
                 "$channel_url" 2>&1
             set -e
-            if [[ -n "$channel_poster" ]]; then
+            if [[ -f "$channel_poster" ]]; then
                 info "Written channel poster: $channel_poster"
             else
                 info "Could not fetch channel poster for $channel_url. Attempted to write to '$channel_poster'"
@@ -551,106 +350,77 @@ fetch_posters() {
             info "Channel poster already present at '$channel_poster'."
         fi
     fi
+
+    # Build a map of playlist_title -> playlist_url in one yt-dlp call,
+    # then only fetch posters for playlists whose folder already exists locally.
+    if [[ -n "$out_prefix" && -d "${out_prefix%/}" ]]; then
+
+        # Build poster fetch opts
+        local POSTER_OPTS=(
+            "--flat-playlist"
+            "--write-thumbnail"
+            "--convert-thumbnails" "jpg"
+            "--no-overwrites"
+            "--no-post-overwrites"
+            "--windows-filenames"
+            "--no-part"
+            "--quiet"
+            "--no-warnings"
+            "--extractor-args" "youtubetab:skip=authcheck"
+            "-o" "thumbnail:"
+            "-o" "pl_thumbnail:${out_prefix}%(playlist_title)s/poster.%(ext)s"
+        )
+        [[ -n "$COOKIES_FILE" ]]         && POSTER_OPTS+=("--cookies" "$COOKIES_FILE")
+        [[ -n "$COOKIES_FROM_BROWSER" ]] && POSTER_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
+        if [[ -n "${FFMPEG_BIN:-}" ]]; then
+            if [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
+                POSTER_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
+            else
+                POSTER_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
+            fi
+        fi
+        [[ -n "${DENO_BIN:-}" ]] && POSTER_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
+
+        info "Building playlist map for posters..."
+        local playlist_map
+        playlist_map="$("$YTDLP_BIN" \
+            --flat-playlist \
+            --print "playlist_title=%(title)s ; playlist_url=%(url)s" \
+            --quiet --no-warnings \
+            "$BASE_URL" 2>/dev/null || true)"
+
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local pl_title pl_url
+            pl_title="${line#playlist_title=}"
+            pl_title="${pl_title% ; playlist_url=*}"
+            pl_url="${line##*; playlist_url=}"
+            local pl_dir="${out_prefix%/}/${pl_title}"
+            if [[ ! -d "$pl_dir" ]]; then
+                echo "  Skipping $pl_title (playlist not downloaded)"
+                continue
+            fi
+            if [[ -f "${pl_dir}/poster.jpg" ]]; then
+                echo "  Skipping $pl_title (poster already downloaded)"
+                continue
+            fi
+            echo "  Fetching poster for '$pl_title': ${pl_dir}/poster.jpg"
+            set +e
+            "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$pl_url" 2>&1
+            set -e
+        done <<< "$playlist_map"
+    else
+        # No out_prefix -- iterate URLs directly
+        for url in "${urls[@]}"; do
+            info "Fetching poster: $url"
+            set +e
+            "$YTDLP_BIN" "${POSTER_OPTS[@]}" "$url" 2>&1
+            set -e
+        done
+    fi
+
 }
 
-# -- 7. Process each URL --
-
-# --posters-only mode: completely independent — build its own opts and skip
-# all other flag processing (naming, sidecar, audio, format selection etc.)
-if [[ "$POSTERS_ONLY" == true ]]; then
-    fetch_posters "$OUT_PREFIX"
-    info "Done fetching posters"
-    exit 0
-fi
-# Common yt-dlp options (array - no word-splitting surprises)
-if [[ "$AUDIO_ONLY" == true ]]; then
-    BASE_OPTS=(
-        "--windows-filenames"
-        "-x"
-        "--audio-format" "mp3"
-        "--audio-quality" "0"
-    )
-else
-    BASE_OPTS=(
-        "--write-subs"
-        "--sub-lang" "en"
-        "--convert-subs" "srt"
-        "--embed-subs"
-        "--windows-filenames"
-        "-f" "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-    )
-fi
-
-# Pass bundled ffmpeg location to yt-dlp if we found one.
-# FFMPEG_BIN is already a Windows path on Cygwin/MSYS/MINGW (converted above).
-if [[ -n "$FFMPEG_BIN" ]]; then
-    if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
-        # Use the already-converted Windows path directly
-        BASE_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
-    else
-        BASE_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
-    fi
-fi
-
-# On Windows, test whether long path support is active by actually trying to
-# create a file with a path longer than 260 characters. This is more reliable
-# than reading the registry, which may not reflect reality until after a reboot.
-if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
-    LONG_PATH_OK=false
-    test_dir="$(mktemp -d 2>/dev/null || echo "")"
-    if [[ -n "$test_dir" ]]; then
-        # Build a filename that exceeds 260 chars on its own
-        long_name="$(printf '%0.s x' {1..140} | tr -d ' ')"
-        if touch "${test_dir}/${long_name}" 2>/dev/null; then
-            LONG_PATH_OK=true
-            rm -f "${test_dir}/${long_name}"
-        fi
-        rmdir "$test_dir" 2>/dev/null || true
-    fi
-    if [[ "$LONG_PATH_OK" == false ]]; then
-        info "Windows long path support not enabled -- trimming filenames to 200 chars"
-        info "To enable, run as Administrator:"
-        info 'reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f'
-        # 200 chars keeps the [VideoID] intact in Jellyfin filenames
-        # while still safely under the 260-char MAX_PATH with typical base paths
-        BASE_OPTS+=("--trim-filenames" "200")
-    fi
-fi
-
-# Cookies for authenticated access
-if [[ -n "$COOKIES_FILE" ]]; then
-    [[ -f "$COOKIES_FILE" ]] || die "Cookies file not found: $COOKIES_FILE"
-    BASE_OPTS+=("--cookies" "$COOKIES_FILE")
-elif [[ -n "$COOKIES_FROM_BROWSER" ]]; then
-    BASE_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
-fi
-
-# If a supported JS runtime is available, let yt-dlp use its full default client
-# list (which includes JS-dependent clients for best quality).
-# Prefer bundled deno, then system deno/node/phantomjs, then fall back to limited clients.
-if [[ -n "$DENO_BIN_EXEC" ]]; then
-    info "Using bundled deno for yt-dlp JS support"
-    BASE_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
-elif command -v deno &>/dev/null || command -v node &>/dev/null || command -v phantomjs &>/dev/null; then
-    JS_RT="$(command -v deno &>/dev/null && echo deno || command -v node &>/dev/null && echo node || echo phantomjs)"
-    info "JS runtime found ($JS_RT) -- using default yt-dlp clients"
-else
-    info "No JS runtime found -- using mweb,ios clients (install deno for best quality)"
-    BASE_OPTS+=("--extractor-args" "youtube:player_client=mweb,ios")
-fi
-
-# Jellyfin-compatible output template:
-# --sidecar: save .info.json and thumbnail alongside each video,
-# plus poster.jpg in each playlist/channel folder for Jellyfin series/season images
-if [[ "$SIDECAR" == true ]]; then
-    BASE_OPTS+=(
-        "--write-info-json"
-        "--write-thumbnail"
-        "--convert-thumbnails" "jpg"
-        "--no-write-playlist-metafiles"
-        "--no-overwrites"
-    )
-fi
 
 # Build the output filename template from the naming flags.
 # yt-dlp supports %(channel)s, %(title)s, %(id)s, %(playlist_index)s etc.
@@ -782,6 +552,256 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
     done
 }
 
+
+# -- 6. Check / download yt-dlp --
+
+if [[ ! -x "$YTDLP_BIN" ]]; then
+    info "yt-dlp not found. Downloading from GitHub..."
+    DL_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/${BINARY}"
+    fetch "$DL_URL" "$YTDLP_BIN"
+    chmod +x "$YTDLP_BIN"
+    info "Saved to $YTDLP_BIN"
+fi
+
+if [[ "$DO_UPDATE" == true ]]; then
+    info "Updating yt-dlp at ${YTDLP_BIN}..."
+    if [[ -w "$YTDLP_BIN" ]]; then
+        "$YTDLP_BIN" -U
+    else
+        die "Cannot update: $YTDLP_BIN is not writable. Try running with sudo, or update the bundle manually."
+    fi
+
+    # Update bundled deno if present; skip if deno is a system install on PATH
+    # (system deno should be updated via its own package manager)
+    if [[ -n "$DENO_BIN_EXEC" && -f "$DENO_BIN_EXEC" ]]; then
+        info "Updating bundled deno at ${DENO_BIN_EXEC}..."
+        if [[ -w "$DENO_BIN_EXEC" ]]; then
+            # deno upgrade replaces itself in-place by default
+            "$DENO_BIN_EXEC" upgrade --output "$DENO_BIN_EXEC" || true
+        else
+            info "Cannot update deno: $DENO_BIN_EXEC is not writable -- skipping"
+        fi
+    fi
+
+    # If no URL was given, update-only mode -- exit cleanly after updating
+    [[ -z "$BASE_URL" ]] && exit 0
+fi
+
+
+# -- 7. Resolve output directory --
+
+if [[ -n "$OUTPUT_DIR" ]]; then
+    mkdir -p "$OUTPUT_DIR" || die "Cannot create output directory: $OUTPUT_DIR"
+    OUT_PREFIX="${OUTPUT_DIR}/"
+elif [[ "$BASE_URL" == *"/@"* || "$BASE_URL" == */channel/* || "$BASE_URL" == */user/* ]]; then
+    # Looks like a channel page -- try to extract the channel name
+    CHANNEL_NAME=""
+
+    if [[ "$BASE_URL" == *"/@"* ]]; then
+        # /@ChannelName/... -- name is right there in the URL, no extra yt-dlp call needed
+        CHANNEL_NAME="$(echo "$BASE_URL" | sed 's|.*/@||; s|/.*||')"
+        # If URL has no path after the channel handle, prompt for what to download
+        if [[ "$BASE_URL" =~ ^https://www\.youtube\.com/@[^/]+/?$ ]]; then
+            CHANNEL_HANDLE="${BASE_URL%/}"
+            CHANNEL_HANDLE="${CHANNEL_HANDLE##*/}"  # just @Name
+            BASE_CHANNEL_URL="${BASE_URL%/}"
+            # Build list of endpoints to download
+            ENDPOINTS=()
+            if [[ "$FORCE_YES" == true ]]; then
+                ENDPOINTS=("playlists" "videos" "shorts")
+            else
+                for endpoint in playlists videos shorts; do
+                    read_tty _ans "Download ${endpoint} from ${CHANNEL_HANDLE}? (y/n): "
+                    [[ "$_ans" =~ ^[yY]$ ]] && ENDPOINTS+=("$endpoint")
+                done
+            fi
+            [[ ${#ENDPOINTS[@]} -eq 0 ]] && { echo "Nothing selected. Bye."; exit 0; }
+            # Set BASE_URL to first endpoint; remaining handled after main loop
+            BASE_URL="${BASE_CHANNEL_URL}/${ENDPOINTS[0]}"
+            info "Will download: ${ENDPOINTS[*]}"
+        fi
+    else
+        # /channel/UCxxx or /user/Name -- ask yt-dlp for the uploader name
+        info "Detecting channel name..."
+        CHANNEL_NAME="$("$YTDLP_BIN" --flat-playlist --playlist-items 1 --print uploader "$BASE_URL" 2>/dev/null | head -1)"
+    fi
+
+    if [[ -n "$CHANNEL_NAME" && "$CHANNEL_NAME" != "NA" ]]; then
+        CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
+        info "Using channel name as output directory: $CHANNEL_NAME"
+        mkdir -p "$CHANNEL_NAME" || die "Cannot create output directory: $CHANNEL_NAME"
+        OUT_PREFIX="${CHANNEL_NAME}/"
+    else
+        info "Could not detect channel name -- saving to current directory"
+        OUT_PREFIX=""
+    fi
+else
+    OUT_PREFIX=""
+fi
+
+
+# -- 8. Fetch playlist list --
+
+# For channel pages, expand into individual playlist URLs.
+# For direct playlist or video URLs, use as-is -- the flat-playlist
+# expansion would incorrectly treat video IDs as playlist IDs.
+info "Fetching content from $BASE_URL"
+
+urls=()
+
+if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
+      "$BASE_URL" == *"youtube.com/watch?"* || \
+      "$BASE_URL" == *"youtu.be/"* || \
+      "$BASE_URL" == *"/@"*"/videos" || \
+      "$BASE_URL" == *"/@"*"/shorts" ]]; then
+    # Direct playlist, video, /videos or /shorts URL -- use as-is, no expansion needed
+    urls=("$BASE_URL")
+else
+    # Channel or other page -- expand into list of playlist URLs
+    stderr_tmp="$(mktemp)"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && urls+=("$line")
+    done < <(
+        "$YTDLP_BIN" \
+            --flat-playlist \
+            --print "https://www.youtube.com/playlist?list=%(id)s" \
+            "$BASE_URL" 2>"$stderr_tmp"
+    )
+
+    if [[ ${#urls[@]} -eq 0 ]]; then
+        if grep -qi "error\|failed\|unable" "$stderr_tmp" 2>/dev/null; then
+            cat "$stderr_tmp" >&2
+            rm -f "$stderr_tmp"
+            die "yt-dlp reported an error while fetching '$BASE_URL'. Check the URL and your connection."
+        fi
+        # Nothing found -- fall back to using the URL directly
+        urls=("$BASE_URL")
+    fi
+    rm -f "$stderr_tmp"
+fi
+
+[[ ${#urls[@]} -eq 0 || -z "${urls[0]}" ]] && die "No valid URLs found for '$BASE_URL'."
+
+
+# -- 9. Confirm to proceed if more than one URL --
+
+proceed=""
+if [[ "$FORCE_YES" == true || ${#urls[@]} -eq 1 ]]; then
+    echo "Found ${#urls[@]} url(s)."
+    proceed="y"
+else
+    read_tty proceed "Found ${#urls[@]} urls. Proceed? (y/n): "
+fi
+
+if [[ ! "$proceed" =~ ^[yY]$ ]]; then
+    echo "Bye"
+    exit 0
+fi
+
+
+# -- 10. Handle Download posters only --
+
+# --posters-only mode: completely independent — build its own opts and skip
+# all other flag processing (naming, sidecar, audio, format selection etc.)
+if [[ "$POSTERS_ONLY" == true ]]; then
+    fetch_posters "$OUT_PREFIX"
+    info "Done fetching posters"
+    exit 0
+fi
+
+
+# -- 11. Build video download options --
+
+# Common yt-dlp options (array - no word-splitting surprises)
+if [[ "$AUDIO_ONLY" == true ]]; then
+    BASE_OPTS=(
+        "--windows-filenames"
+        "-x"
+        "--audio-format" "mp3"
+        "--audio-quality" "0"
+    )
+else
+    BASE_OPTS=(
+        "--write-subs"
+        "--sub-lang" "en"
+        "--convert-subs" "srt"
+        "--embed-subs"
+        "--windows-filenames"
+        "-f" "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+    )
+fi
+
+# Pass bundled ffmpeg location to yt-dlp if we found one.
+# FFMPEG_BIN is already a Windows path on Cygwin/MSYS/MINGW (converted above).
+if [[ -n "$FFMPEG_BIN" ]]; then
+    if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
+        # Use the already-converted Windows path directly
+        BASE_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
+    else
+        BASE_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
+    fi
+fi
+
+# On Windows, test whether long path support is active by actually trying to
+# create a file with a path longer than 260 characters. This is more reliable
+# than reading the registry, which may not reflect reality until after a reboot.
+if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
+    LONG_PATH_OK=false
+    test_dir="$(mktemp -d 2>/dev/null || echo "")"
+    if [[ -n "$test_dir" ]]; then
+        # Build a filename that exceeds 260 chars on its own
+        long_name="$(printf '%0.s x' {1..140} | tr -d ' ')"
+        if touch "${test_dir}/${long_name}" 2>/dev/null; then
+            LONG_PATH_OK=true
+            rm -f "${test_dir}/${long_name}"
+        fi
+        rmdir "$test_dir" 2>/dev/null || true
+    fi
+    if [[ "$LONG_PATH_OK" == false ]]; then
+        info "Windows long path support not enabled -- trimming filenames to 200 chars"
+        info "To enable, run as Administrator:"
+        info 'reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f'
+        # 200 chars keeps the [VideoID] intact in Jellyfin filenames
+        # while still safely under the 260-char MAX_PATH with typical base paths
+        BASE_OPTS+=("--trim-filenames" "200")
+    fi
+fi
+
+# Cookies for authenticated access
+if [[ -n "$COOKIES_FILE" ]]; then
+    [[ -f "$COOKIES_FILE" ]] || die "Cookies file not found: $COOKIES_FILE"
+    BASE_OPTS+=("--cookies" "$COOKIES_FILE")
+elif [[ -n "$COOKIES_FROM_BROWSER" ]]; then
+    BASE_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
+fi
+
+# If a supported JS runtime is available, let yt-dlp use its full default client
+# list (which includes JS-dependent clients for best quality).
+# Prefer bundled deno, then system deno/node/phantomjs, then fall back to limited clients.
+if [[ -n "$DENO_BIN_EXEC" ]]; then
+    info "Using bundled deno for yt-dlp JS support"
+    BASE_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
+elif command -v deno &>/dev/null || command -v node &>/dev/null || command -v phantomjs &>/dev/null; then
+    JS_RT="$(command -v deno &>/dev/null && echo deno || command -v node &>/dev/null && echo node || echo phantomjs)"
+    info "JS runtime found ($JS_RT) -- using default yt-dlp clients"
+else
+    info "No JS runtime found -- using mweb,ios clients (install deno for best quality)"
+    BASE_OPTS+=("--extractor-args" "youtube:player_client=mweb,ios")
+fi
+
+# Jellyfin-compatible output template:
+# --sidecar: save .info.json and thumbnail alongside each video,
+# plus poster.jpg in each playlist/channel folder for Jellyfin series/season images
+if [[ "$SIDECAR" == true ]]; then
+    BASE_OPTS+=(
+        "--write-info-json"
+        "--write-thumbnail"
+        "--convert-thumbnails" "jpg"
+        "--no-write-playlist-metafiles"
+        "--no-overwrites"
+    )
+fi
+
 # Avoid .part files -- write directly to final filename
 BASE_OPTS+=("--no-part")
 
@@ -794,7 +814,9 @@ BASE_OPTS+=("--no-overwrites")
 # Limit downloads per playlist if requested (useful for testing)
 [[ -n "$MAX_DOWNLOADS" ]] && BASE_OPTS+=("--max-downloads" "$MAX_DOWNLOADS")
 
-# Run main download
+
+# -- 12. Run main download --
+
 run_download urls "$OUT_PREFIX"
 
 # If a bare channel URL was given, process remaining endpoints
@@ -807,7 +829,9 @@ if [[ -n "${ENDPOINTS[*]+x}" && ${#ENDPOINTS[@]} -gt 1 ]]; then
     done
 fi
 
-# -- Cleanup: remove playlist folders with no media files and under size threshold --
+
+# -- 13. Cleanup: remove playlist folders with no media files and under size threshold --
+
 if [[ "$CLEANUP" == true ]]; then
     info "Running cleanup -- removing folders with no media files (must be < 2MB)..."
     cleanup_dir="${OUT_PREFIX:-.}"
@@ -835,6 +859,7 @@ if [[ "$CLEANUP" == true ]]; then
     info "Cleanup done. Removed $removed folder(s)."
 fi
 
-# Run post-download tasks (nfo files + posters).
+# -- 14. Run post-download tasks (nfo files + posters) --
+
 # Also called by the exit trap on error, so always runs.
 post_download
