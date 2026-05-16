@@ -726,9 +726,12 @@ build_template() {  # build_template <in_playlist: true|false>
 
 # Run the full download+sidecar process for a given URL list and prefix
 run_download() {  # run_download <url_list_varname> <out_prefix>
+    info "Starting download ..."
     local -n _urls="$1"
     local _prefix="$2"
+    info "run_download called: ${#_urls[@]} urls, prefix='$_prefix'"  # ADD THIS
     for url in "${_urls[@]}"; do
+        info "Processing url: $url"  # ADD THIS
         OUT_PREFIX="$_prefix"
         OPTS=("${BASE_OPTS[@]}")
         local confirm=""
@@ -755,32 +758,6 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
         [[ -z "$check_dir" ]] && check_dir="."
         check_disk_space "$check_dir" 100
 
-        # Build a temporary download archive from existing [VideoID] filenames
-        # so yt-dlp skips already-downloaded videos without fetching their pages.
-        # Only applies when --keep-id is set (VideoID must be in filename).
-        # Skipped entirely if the output folder is empty or doesn't exist.
-        local tmp_archive=""
-        if [[ "$KEEP_ID" == true && -d "$check_dir" ]]; then
-            local existing_ids
-            existing_ids="$(find "$check_dir" -maxdepth 2 -name "*\[*\]*" 2>/dev/null \
-                | grep -oE "\[[A-Za-z0-9_-]+\]" \
-                | tr -d "[]" \
-                | sort -u)"
-            if [[ -n "$existing_ids" ]]; then
-                tmp_archive="$(mktemp /tmp/yt-archive-XXXXXX.txt)"
-                echo "$existing_ids" | sed "s/^/youtube /" > "$tmp_archive"
-                local id_count
-                id_count="$(echo "$existing_ids" | wc -l | tr -d " ")"
-                # On Cygwin, convert path to Windows format for yt-dlp.exe
-                local tmp_archive_arg="$tmp_archive"
-                if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && command -v cygpath &>/dev/null; then
-                    tmp_archive_arg="$(cygpath -w "$tmp_archive")"
-                fi
-                info "Skipping $id_count already-downloaded video(s)"
-                OPTS+=("--download-archive" "$tmp_archive_arg")
-            fi
-        fi
-
         info "Processing: $url"
         local ytdlp_out
         ytdlp_out="$(mktemp)"
@@ -802,7 +779,6 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
             die "yt-dlp exited with error code $ytdlp_exit -- aborting"
         fi
         rm -f "$ytdlp_out"
-        [[ -n "$tmp_archive" ]] && rm -f "$tmp_archive"
     done
 }
 
