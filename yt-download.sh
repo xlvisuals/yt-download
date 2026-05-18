@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yt-download.sh -- Download YouTube videos, playlists, and channels
 #
-# Version:   2026-05-16
+# Version:   2026-05-18
 # License:   MIT <https://spdx.org/licenses/MIT.html>
 # Copyright: 2026 Axel Busch
 #
@@ -327,6 +327,11 @@ fetch_posters() {
         channel_dir="$(cd "$channel_dir" && pwd)"  # absolute path avoids yt-dlp appending channel name
         local channel_poster="${channel_dir}/poster.jpg"
         if [[ ! -f "$channel_poster" ]]; then
+            # Only fetch channel poster if BASE_URL is a channel URL
+            if [[ "$BASE_URL" != *"/@"* ]]; then
+                info "Skipping channel poster (not a channel URL)"
+                return
+            fi
             info "Fetching channel poster..."
             local _tmp="${BASE_URL#*/@}"
             local _handle="${_tmp%%/*}"
@@ -526,6 +531,8 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
         check_dir="${_prefix:-.}"
         check_dir="${check_dir%/}"
         [[ -z "$check_dir" ]] && check_dir="."
+        # Fall back to current dir if output dir doesn't exist yet
+        [[ ! -d "$check_dir" ]] && check_dir="."
         check_disk_space "$check_dir" 100
 
         info "Processing: $url"
