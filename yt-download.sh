@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yt-download.sh -- Download YouTube videos, playlists, and channels
 #
-# Version:   2026-05-18
+# Version:   2026-05-24
 # License:   MIT <https://spdx.org/licenses/MIT.html>
 # Copyright: 2026 Axel Busch
 #
@@ -400,7 +400,15 @@ fetch_posters() {
             pl_title="${line#playlist_title=}"
             pl_title="${pl_title% ; playlist_url=*}"
             pl_url="${line##*; playlist_url=}"
-            local pl_dir="${out_prefix%/}/${pl_title}"
+            # yt-dlp --windows-filenames replaces | with ｜ (U+FF5C fullwidth).
+            # Normalise the title to match the actual folder name on disk.
+            local pl_title_fs
+            pl_title_fs="$(echo "$pl_title" \
+                | sed 's/|/｜/g' \
+                | sed 's/[\\/:*?"<>]/_/g' \
+                | sed 's/  */ /g' \
+                | sed 's/[. ]*$//)"
+            local pl_dir="${out_prefix%/}/${pl_title_fs}"
             if [[ ! -d "$pl_dir" ]]; then
                 echo "  Skipping $pl_title (playlist not downloaded)"
                 continue
@@ -543,9 +551,15 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
             | tee "$ytdlp_out"
         local ytdlp_exit="${PIPESTATUS[0]}"
         set -e
-        if grep -qE "Sign in to confirm|cookies are no longer valid" "$ytdlp_out" 2>/dev/null; then
+        # Only abort on auth errors if yt-dlp actually failed.
+        # Cookie rotation warnings can appear even when the download succeeds.
+        if [[ "$ytdlp_exit" -ne 0 ]] && grep -q "cookies are no longer valid" "$ytdlp_out" 2>/dev/null; then
             rm -f "$ytdlp_out"
             die "YouTube authentication failed -- your cookies have expired. Re-export them with -b BROWSER or -c cookies.txt"
+        fi
+        if [[ "$ytdlp_exit" -ne 0 ]] && grep -q "Sign in to confirm" "$ytdlp_out" 2>/dev/null; then
+            rm -f "$ytdlp_out"
+            die "YouTube requires sign-in. Use -b BROWSER or -c cookies.txt"
         fi
 
         # Exit code 1 with no bot error means some videos were skipped (private/unavailable)
