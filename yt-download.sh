@@ -551,21 +551,18 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
             | tee "$ytdlp_out"
         local ytdlp_exit="${PIPESTATUS[0]}"
         set -e
-        # Only abort on auth errors if yt-dlp actually failed.
-        # Cookie rotation warnings can appear even when the download succeeds.
-        if [[ "$ytdlp_exit" -ne 0 ]] && grep -q "cookies are no longer valid" "$ytdlp_out" 2>/dev/null; then
-            rm -f "$ytdlp_out"
-            die "YouTube authentication failed -- your cookies have expired. Re-export them with -b BROWSER or -c cookies.txt"
-        fi
-        if [[ "$ytdlp_exit" -ne 0 ]] && grep -q "Sign in to confirm" "$ytdlp_out" 2>/dev/null; then
-            rm -f "$ytdlp_out"
-            die "YouTube requires sign-in. Use -b BROWSER or -c cookies.txt"
-        fi
-
-        # Exit code 1 with no bot error means some videos were skipped (private/unavailable)
-        # Exit code 101  means Maximum number of downloads reached, stopping due to --max-downloads
-        # Exit code > 1 and not 101 means a more serious error -- abort
+        # Exit code 1: some videos skipped (private/unavailable) -- continue
+        # Exit code 101: --max-downloads reached -- continue
+        # Exit code > 1 and not 101: serious error -- check for auth issues first
         if [[ "$ytdlp_exit" -gt 1 && "$ytdlp_exit" != 101 ]]; then
+            if grep -q "cookies are no longer valid" "$ytdlp_out" 2>/dev/null; then
+                rm -f "$ytdlp_out"
+                die "YouTube authentication failed -- your cookies have expired. Re-export them with -b BROWSER or -c cookies.txt"
+            fi
+            if grep -q "Sign in to confirm" "$ytdlp_out" 2>/dev/null; then
+                rm -f "$ytdlp_out"
+                die "YouTube requires sign-in. Use -b BROWSER or -c cookies.txt"
+            fi
             rm -f "$ytdlp_out"
             die "yt-dlp exited with error code $ytdlp_exit -- aborting"
         fi

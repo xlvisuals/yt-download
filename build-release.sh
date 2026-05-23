@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # build-release.sh -- Assemble yt-download release bundles for each platform
 #
@@ -10,6 +9,8 @@ set -euo pipefail
 #   dist/yt-download_linux.tar.gz
 #   dist/yt-download_linux_aarch64.tar.gz
 #   dist/yt-download_windows.zip        (Git Bash / x86_64)
+
+set -euo pipefail
 
 # ─────────────────────────────────────────────
 # Helpers
@@ -45,13 +46,6 @@ YTDLP_TAG="$(
 [[ -z "$YTDLP_TAG" ]] && die "Could not resolve yt-dlp release tag"
 info "yt-dlp: $YTDLP_TAG"
 
-# yt-dlp/FFmpeg-Builds uses a rolling "latest" release, no versioned tags
-info "Using yt-dlp/FFmpeg-Builds latest release"
-
-info "Resolving latest deno release"
-DENO_VERSION="$(fetch https://dl.deno.land/release-latest.txt - | tr -d "[:space:]")"
-[[ -z "$DENO_VERSION" ]] && die "Could not resolve deno release version"
-info "deno: $DENO_VERSION"
 
 # ─────────────────────────────────────────────
 # Directories
@@ -60,6 +54,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="${SCRIPT_DIR}/dist"
 CACHE_DIR="${SCRIPT_DIR}/.build-cache"
 mkdir -p "$DIST_DIR" "$CACHE_DIR"
+
+info "Resolving latest deno release"
+DENO_VERSION="$(fetch https://dl.deno.land/release-latest.txt - | tr -d "[:space:]")"
+[[ -z "$DENO_VERSION" ]] && die "Could not resolve deno release version"
+info "deno: $DENO_VERSION"
+
+# ffmpeg has no reliable version API -- refresh it whenever yt-dlp updates
+YTDLP_VERSION_FILE="${CACHE_DIR}/yt-dlp.version"
+CACHED_YTDLP_TAG=""
+[[ -f "$YTDLP_VERSION_FILE" ]] && CACHED_YTDLP_TAG="$(cat "$YTDLP_VERSION_FILE")"
+if [[ -n "$CACHED_YTDLP_TAG" && "$CACHED_YTDLP_TAG" != "$YTDLP_TAG" ]]; then
+    info "yt-dlp updated ($CACHED_YTDLP_TAG -> $YTDLP_TAG) -- clearing ffmpeg cache"
+    rm -f "${CACHE_DIR}"/ffmpeg-* "${CACHE_DIR}"/ffmpeg_*
+fi
 
 # ─────────────────────────────────────────────
 # Source files to include in every bundle
@@ -102,15 +110,24 @@ DENO_LINUX_AARCH64_ARCHIVE="deno-aarch64-unknown-linux-gnu.zip"
 DENO_WIN_ARCHIVE="deno-x86_64-pc-windows-msvc.zip"
 
 # ─────────────────────────────────────────────
-# Helper: download and cache a file
+# Helper: download and cache a file, re-downloading if version changed
 # ─────────────────────────────────────────────
-cached_fetch() {    # cached_fetch <url> <local-filename>
-    local url="$1" dest="${CACHE_DIR}/$2"
-    if [[ -f "$dest" ]]; then
-        echo "  (cached) $2" >&2
+cached_fetch() {    # cached_fetch <url> <local-filename> [version]
+    local url="$1" dest="${CACHE_DIR}/$2" version="${3:-}"
+    local version_file="${dest}.version"
+    local cached_version=""
+    [[ -f "$version_file" ]] && cached_version="$(cat "$version_file")"
+
+    if [[ -f "$dest" && ( -z "$version" || "$cached_version" == "$version" ) ]]; then
+        echo "  (cached) $2${version:+ @ $cached_version}" >&2
     else
-        echo "  Downloading $2 ..." >&2
+        if [[ -f "$dest" && -n "$version" && "$cached_version" != "$version" ]]; then
+            echo "  (update) $2: $cached_version -> $version" >&2
+        else
+            echo "  Downloading $2${version:+ @ $version} ..." >&2
+        fi
         fetch "$url" "$dest"
+        [[ -n "$version" ]] && echo "$version" > "$version_file"
     fi
     echo "$dest"
 }
@@ -198,42 +215,57 @@ make_bundle() {
 YTDLP_BASE="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_TAG}"
 
 info "Fetching yt-dlp binaries"
-YTDLP_MACOS="$(    cached_fetch "${YTDLP_BASE}/yt-dlp_macos"           "yt-dlp_macos")"
-YTDLP_LINUX="$(    cached_fetch "${YTDLP_BASE}/yt-dlp_linux"           "yt-dlp_linux")"
-YTDLP_AARCH64="$(    cached_fetch "${YTDLP_BASE}/yt-dlp_linux_aarch64"   "yt-dlp_linux_aarch64")"
-YTDLP_WIN="$(      cached_fetch "${YTDLP_BASE}/yt-dlp.exe"             "yt-dlp.exe")"
+YTDLP_MACOS="$(    cached_fetch "${YTDLP_BASE}/yt-dlp_macos"           "yt-dlp_macos"           "$YTDLP_TAG")"
+YTDLP_LINUX="$(    cached_fetch "${YTDLP_BASE}/yt-dlp_linux"           "yt-dlp_linux"           "$YTDLP_TAG")"
+YTDLP_AARCH64="$(  cached_fetch "${YTDLP_BASE}/yt-dlp_linux_aarch64"   "yt-dlp_linux_aarch64"   "$YTDLP_TAG")"
+YTDLP_WIN="$(      cached_fetch "${YTDLP_BASE}/yt-dlp.exe"             "yt-dlp.exe"             "$YTDLP_TAG")"
+echo "$YTDLP_TAG" > "$YTDLP_VERSION_FILE"
 
 # ─────────────────────────────────────────────
 # Download and extract ffmpeg binaries
 # ─────────────────────────────────────────────
 info "Fetching ffmpeg binaries"
 
-FFMPEG_MACOS_X64_ARCHIVE_PATH="$( cached_fetch "$FFMPEG_MACOS_X64_URL"                          "ffmpeg-macos-x64.zip")"
-FFMPEG_MACOS_AARCH64_ARCHIVE_PATH="$( cached_fetch "$FFMPEG_MACOS_AARCH64_URL"                          "ffmpeg-macos-aarch64.zip")"
-FFMPEG_LINUX_ARCHIVE_PATH="$(       cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_LINUX_ARCHIVE}"     "$FFMPEG_LINUX_ARCHIVE")"
-FFMPEG_LINUX_AARCH64_ARCHIVE_PATH="$( cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_LINUX_AARCH64_ARCHIVE}" "$FFMPEG_LINUX_AARCH64_ARCHIVE")"
-FFMPEG_WIN_ARCHIVE_PATH="$(         cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_WIN_ARCHIVE}"       "$FFMPEG_WIN_ARCHIVE")"
+FFMPEG_MACOS_X64_ARCHIVE_PATH="$(     cached_fetch "$FFMPEG_MACOS_X64_URL"                                  "ffmpeg-macos-x64.zip")"
+FFMPEG_MACOS_AARCH64_ARCHIVE_PATH="$( cached_fetch "$FFMPEG_MACOS_AARCH64_URL"                              "ffmpeg-macos-aarch64.zip")"
+FFMPEG_LINUX_ARCHIVE_PATH="$(         cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_LINUX_ARCHIVE}"           "$FFMPEG_LINUX_ARCHIVE")"
+FFMPEG_LINUX_AARCH64_ARCHIVE_PATH="$( cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_LINUX_AARCH64_ARCHIVE}"   "$FFMPEG_LINUX_AARCH64_ARCHIVE")"
+FFMPEG_WIN_ARCHIVE_PATH="$(           cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_WIN_ARCHIVE}"             "$FFMPEG_WIN_ARCHIVE")"
 
 info "Fetching deno binaries"
-DENO_MACOS_X64_PATH="$(  cached_fetch "${DENO_BASE}/${DENO_MACOS_X64_ARCHIVE}"   "$DENO_MACOS_X64_ARCHIVE")"
-DENO_MACOS_AARCH64_PATH="$(  cached_fetch "${DENO_BASE}/${DENO_MACOS_AARCH64_ARCHIVE}"   "$DENO_MACOS_AARCH64_ARCHIVE")"
-DENO_LINUX_X64_PATH="$(        cached_fetch "${DENO_BASE}/${DENO_LINUX_X64_ARCHIVE}"         "$DENO_LINUX_X64_ARCHIVE")"
-DENO_LINUX_AARCH64_PATH="$(  cached_fetch "${DENO_BASE}/${DENO_LINUX_AARCH64_ARCHIVE}"   "$DENO_LINUX_AARCH64_ARCHIVE")"
-DENO_WIN_PATH="$(          cached_fetch "${DENO_BASE}/${DENO_WIN_ARCHIVE}"           "$DENO_WIN_ARCHIVE")"
+DENO_MACOS_X64_PATH="$(     cached_fetch "${DENO_BASE}/${DENO_MACOS_X64_ARCHIVE}"       "$DENO_MACOS_X64_ARCHIVE"       "$DENO_VERSION")"
+DENO_MACOS_AARCH64_PATH="$( cached_fetch "${DENO_BASE}/${DENO_MACOS_AARCH64_ARCHIVE}"   "$DENO_MACOS_AARCH64_ARCHIVE"   "$DENO_VERSION")"
+DENO_LINUX_X64_PATH="$(      cached_fetch "${DENO_BASE}/${DENO_LINUX_X64_ARCHIVE}"       "$DENO_LINUX_X64_ARCHIVE"       "$DENO_VERSION")"
+DENO_LINUX_AARCH64_PATH="$( cached_fetch "${DENO_BASE}/${DENO_LINUX_AARCH64_ARCHIVE}"   "$DENO_LINUX_AARCH64_ARCHIVE"   "$DENO_VERSION")"
+DENO_WIN_PATH="$(            cached_fetch "${DENO_BASE}/${DENO_WIN_ARCHIVE}"             "$DENO_WIN_ARCHIVE"             "$DENO_VERSION")"
+
+# extract_if_needed: only re-extract if archive is newer than the binary
+extract_if_needed() {  # extract_if_needed <archive> <binary_in_archive> <dest> <version>
+    local archive="$1" binary="$2" dest="$3" version="$4"
+    local version_file="${dest}.version"
+    local cached_version=""
+    [[ -f "$version_file" ]] && cached_version="$(cat "$version_file")"
+    if [[ -f "$dest" && "$cached_version" == "$version" ]]; then
+        echo "  (cached) $(basename "$dest") @ $cached_version" >&2
+    else
+        extract_ffmpeg "$archive" "$binary" "$dest"
+        echo "$version" > "$version_file"
+    fi
+}
 
 info "Extracting ffmpeg binaries"
-FFMPEG_MACOS_X64="${CACHE_DIR}/ffmpeg_macos_x64"; extract_ffmpeg "$FFMPEG_MACOS_X64_ARCHIVE_PATH" "ffmpeg"     "$FFMPEG_MACOS_X64"
-FFMPEG_MACOS_AARCH64="${CACHE_DIR}/ffmpeg_macos_aarch64"; extract_ffmpeg "$FFMPEG_MACOS_AARCH64_ARCHIVE_PATH" "ffmpeg"     "$FFMPEG_MACOS_AARCH64"
-FFMPEG_LINUX="${CACHE_DIR}/ffmpeg_linux";             extract_ffmpeg "$FFMPEG_LINUX_ARCHIVE_PATH"       "ffmpeg"     "$FFMPEG_LINUX"
-FFMPEG_LINUX_AARCH64="${CACHE_DIR}/ffmpeg_linux_aarch64"; extract_ffmpeg "$FFMPEG_LINUX_AARCH64_ARCHIVE_PATH" "ffmpeg"     "$FFMPEG_LINUX_AARCH64"
-FFMPEG_WIN="${CACHE_DIR}/ffmpeg.exe";                 extract_ffmpeg "$FFMPEG_WIN_ARCHIVE_PATH"         "ffmpeg.exe" "$FFMPEG_WIN"
+FFMPEG_MACOS_X64="${CACHE_DIR}/ffmpeg_macos_x64";         extract_ffmpeg "$FFMPEG_MACOS_X64_ARCHIVE_PATH"         "ffmpeg"     "$FFMPEG_MACOS_X64"
+FFMPEG_MACOS_AARCH64="${CACHE_DIR}/ffmpeg_macos_aarch64"; extract_ffmpeg "$FFMPEG_MACOS_AARCH64_ARCHIVE_PATH"     "ffmpeg"     "$FFMPEG_MACOS_AARCH64"
+FFMPEG_LINUX="${CACHE_DIR}/ffmpeg_linux";                 extract_ffmpeg "$FFMPEG_LINUX_ARCHIVE_PATH"             "ffmpeg"     "$FFMPEG_LINUX"
+FFMPEG_LINUX_AARCH64="${CACHE_DIR}/ffmpeg_linux_aarch64"; extract_ffmpeg "$FFMPEG_LINUX_AARCH64_ARCHIVE_PATH"     "ffmpeg"     "$FFMPEG_LINUX_AARCH64"
+FFMPEG_WIN="${CACHE_DIR}/ffmpeg.exe";                     extract_ffmpeg "$FFMPEG_WIN_ARCHIVE_PATH"               "ffmpeg.exe" "$FFMPEG_WIN"
 
 info "Extracting deno binaries"
-DENO_MACOS_X64="${CACHE_DIR}/deno_macos_x64"; extract_ffmpeg "$DENO_MACOS_X64_PATH"  "deno"     "$DENO_MACOS_X64"
-DENO_MACOS_AARCH64="${CACHE_DIR}/deno_macos_aarch64"; extract_ffmpeg "$DENO_MACOS_AARCH64_PATH"  "deno"     "$DENO_MACOS_AARCH64"
-DENO_LINUX_X64="${CACHE_DIR}/deno_linux_x64";             extract_ffmpeg "$DENO_LINUX_X64_PATH"        "deno"     "$DENO_LINUX_X64"
-DENO_LINUX_AARCH64="${CACHE_DIR}/deno_linux_aarch64"; extract_ffmpeg "$DENO_LINUX_AARCH64_PATH"  "deno"     "$DENO_LINUX_AARCH64"
-DENO_WIN="${CACHE_DIR}/deno.exe";                  extract_ffmpeg "$DENO_WIN_PATH"          "deno.exe" "$DENO_WIN"
+DENO_MACOS_X64="${CACHE_DIR}/deno_macos_x64";         extract_if_needed "$DENO_MACOS_X64_PATH"       "deno"     "$DENO_MACOS_X64"         "$DENO_VERSION"
+DENO_MACOS_AARCH64="${CACHE_DIR}/deno_macos_aarch64"; extract_if_needed "$DENO_MACOS_AARCH64_PATH"   "deno"     "$DENO_MACOS_AARCH64"     "$DENO_VERSION"
+DENO_LINUX_X64="${CACHE_DIR}/deno_linux_x64";         extract_if_needed "$DENO_LINUX_X64_PATH"       "deno"     "$DENO_LINUX_X64"         "$DENO_VERSION"
+DENO_LINUX_AARCH64="${CACHE_DIR}/deno_linux_aarch64"; extract_if_needed "$DENO_LINUX_AARCH64_PATH"   "deno"     "$DENO_LINUX_AARCH64"     "$DENO_VERSION"
+DENO_WIN="${CACHE_DIR}/deno.exe";                     extract_if_needed "$DENO_WIN_PATH"             "deno.exe" "$DENO_WIN"               "$DENO_VERSION"
 
 # ─────────────────────────────────────────────
 # Assemble bundles
