@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # yt-rename.sh -- Rename YouTube sidecar-style filenames using info.json metadata.
+#
+# Version:   2026-05-25
+# License:   MIT <https://spdx.org/licenses/MIT.html>
+# Copyright: 2026 Axel Busch
 #
 # Jellyfin style:  Channel - 20231015 - Some Video Title [VideoID].mp4
 # Normal style:    001-Some Video Title.mp4
@@ -11,6 +13,8 @@ set -euo pipefail
 # Part of the yt-download suite.
 # Renames all sidecar files (.info.json, .jpg, .webp, .srt) to match.
 # Does not change folder structure.
+
+set -euo pipefail
 
 # --- Helpers ---
 die()  { echo "Error: $*" >&2; exit 1; }

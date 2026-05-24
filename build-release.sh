@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-
 # build-release.sh -- Assemble yt-download release bundles for each platform
 #
-# Downloads the latest yt-dlp and ffmpeg binaries for each platform,
+# Version:   2026-05-25
+# License:   MIT <https://spdx.org/licenses/MIT.html>
+# Copyright: 2026 Axel Busch
+#
+# Downloads the latest yt-dlp, ffmpeg, and ffplay binaries for each platform,
 # packages them with yt-download.sh and README.md, and produces:
 #
 #   dist/yt-download_macos.tar.gz
@@ -72,13 +75,19 @@ fi
 # ─────────────────────────────────────────────
 # Source files to include in every bundle
 # ─────────────────────────────────────────────
-SCRIPT="${SCRIPT_DIR}/yt-download.sh"
-RENAME="${SCRIPT_DIR}/yt-rename.sh"
-NFO="${SCRIPT_DIR}/yt-nfo.sh"
+SCRIPT_COMMON="${SCRIPT_DIR}/yt-common.sh"
+SCRIPT_CONVERT="${SCRIPT_DIR}/yt-convert.sh"
+SCRIPT_DOWNLOAD="${SCRIPT_DIR}/yt-download.sh"
+SCRIPT_NFO="${SCRIPT_DIR}/yt-nfo.sh"
+SCRIPT_RENAME="${SCRIPT_DIR}/yt-rename.sh"
+SCRIPT_EMOJI="${SCRIPT_DIR}/yt-strip-emoji.sh"
 README="${SCRIPT_DIR}/README.md"
-[[ -f "$SCRIPT" ]]  || die "yt-download.sh not found in $SCRIPT_DIR"
-[[ -f "$RENAME" ]]  || die "yt-rename.sh not found in $SCRIPT_DIR"
-[[ -f "$NFO" ]]     || die "yt-nfo.sh not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT_CONVERT" ]]  || die "yt-convert.sh not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT_COMMON" ]]  || die "yt-common.sh not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT_DOWNLOAD" ]]  || die "yt-download.sh not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT_NFO" ]]     || die "yt-nfo.sh not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT_RENAME" ]]  || die "yt-rename.sh not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT_EMOJI" ]]  || die "yt-strip-emoji.sh not found in $SCRIPT_DIR"
 [[ -f "$README" ]]  || die "README.md not found in $SCRIPT_DIR"
 
 # ─────────────────────────────────────────────
@@ -94,8 +103,10 @@ FFMPEG_WIN_ARCHIVE="ffmpeg-master-latest-win64-gpl.zip"
 
 # evermeet.cx: /getrelease redirects to the latest release zip (x64 only)
 FFMPEG_MACOS_X64_URL="https://evermeet.cx/ffmpeg/getrelease/zip"
+FFPLAY_MACOS_X64_URL="https://evermeet.cx/ffmpeg/getrelease/ffplay/zip"
 # martin-riedl.de: static ARM64 build, signed and notarized
 FFMPEG_MACOS_AARCH64_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip"
+FFPLAY_MACOS_AARCH64_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffplay.zip"
 
 # ─────────────────────────────────────────────
 # deno binary sources (GitHub releases)
@@ -160,23 +171,28 @@ extract_ffmpeg() {  # extract_ffmpeg <archive> <binary_name_in_archive> <dest_pa
 # Helper: assemble one bundle
 # ─────────────────────────────────────────────
 make_bundle() {
-    # Args: <bundle_name> <archive_type: tar|zip> <ytdlp_binary> <ffmpeg_src_path> [deno_src_path]
-    local name="$1" arc_type="$2" ytdlp_src="$3" ffmpeg_src="$4" deno_src="${5:-}"
+    # Args: <bundle_name> <archive_type: tar|zip> <ytdlp_binary> <ffmpeg_src_path> <ffplay_src_path> [deno_src_path]
+    local name="$1" arc_type="$2" ytdlp_src="$3" ffmpeg_src="$4" ffplay_src="$5" deno_src="${6:-}"
     local stage_dir="${CACHE_DIR}/stage/${name}"
 
     info "Building $name"
     rm -rf "$stage_dir"
     mkdir -p "$stage_dir"
 
-    cp "$SCRIPT"        "$stage_dir/yt-download.sh"
-    cp "$RENAME"        "$stage_dir/yt-rename.sh"
-    cp "$NFO"           "$stage_dir/yt-nfo.sh"
-    cp "$README"        "$stage_dir/README.md"
-    cp "$ytdlp_src"  "$stage_dir/$(basename "$ytdlp_src")"
-    # Always name ffmpeg binary "ffmpeg" (or "ffmpeg.exe") in the bundle
-    local ffmpeg_name
+    cp "$SCRIPT_CONVERT"    "$stage_dir/yt-convert.sh"
+    cp "$SCRIPT_COMMON"     "$stage_dir/yt-common.sh"
+    cp "$SCRIPT_DOWNLOAD"   "$stage_dir/yt-download.sh"
+    cp "$SCRIPT_NFO"        "$stage_dir/yt-nfo.sh"
+    cp "$SCRIPT_RENAME"     "$stage_dir/yt-rename.sh"
+    cp "$SCRIPT_EMOJI"      "$stage_dir/yt-strip-emoji.sh"
+    cp "$README"            "$stage_dir/README.md"
+    cp "$ytdlp_src"         "$stage_dir/$(basename "$ytdlp_src")"
+    # Always name ffmpeg/ffplay binaries consistently in the bundle
+    local ffmpeg_name ffplay_name
     [[ "$ffmpeg_src" == *.exe ]] && ffmpeg_name="ffmpeg.exe" || ffmpeg_name="ffmpeg"
+    [[ "$ffplay_src" == *.exe ]] && ffplay_name="ffplay.exe" || ffplay_name="ffplay"
     cp "$ffmpeg_src" "$stage_dir/$ffmpeg_name"
+    cp "$ffplay_src" "$stage_dir/$ffplay_name"
     if [[ -n "$deno_src" ]]; then
         # Always name the binary "deno" (or "deno.exe") in the bundle
         local deno_name
@@ -187,9 +203,12 @@ make_bundle() {
 
     chmod +x "$stage_dir/$(basename "$ytdlp_src")"
     chmod +x "$stage_dir/$ffmpeg_name"
+    chmod +x "$stage_dir/$ffplay_name"
+    chmod +x "$stage_dir/yt-convert.sh"
     chmod +x "$stage_dir/yt-download.sh"
     chmod +x "$stage_dir/yt-rename.sh"
     chmod +x "$stage_dir/yt-nfo.sh"
+    chmod +x "$stage_dir/yt-strip-emoji.sh"
 
     local out_file
     if [[ "$arc_type" == "tar" ]]; then
@@ -228,6 +247,8 @@ info "Fetching ffmpeg binaries"
 
 FFMPEG_MACOS_X64_ARCHIVE_PATH="$(     cached_fetch "$FFMPEG_MACOS_X64_URL"                                  "ffmpeg-macos-x64.zip")"
 FFMPEG_MACOS_AARCH64_ARCHIVE_PATH="$( cached_fetch "$FFMPEG_MACOS_AARCH64_URL"                              "ffmpeg-macos-aarch64.zip")"
+FFPLAY_MACOS_X64_ARCHIVE_PATH="$(     cached_fetch "$FFPLAY_MACOS_X64_URL"                                   "ffplay-macos-x64.zip")"
+FFPLAY_MACOS_AARCH64_ARCHIVE_PATH="$( cached_fetch "$FFPLAY_MACOS_AARCH64_URL"                               "ffplay-macos-aarch64.zip")"
 FFMPEG_LINUX_ARCHIVE_PATH="$(         cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_LINUX_ARCHIVE}"           "$FFMPEG_LINUX_ARCHIVE")"
 FFMPEG_LINUX_AARCH64_ARCHIVE_PATH="$( cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_LINUX_AARCH64_ARCHIVE}"   "$FFMPEG_LINUX_AARCH64_ARCHIVE")"
 FFMPEG_WIN_ARCHIVE_PATH="$(           cached_fetch "${FFMPEG_YTDLP_BASE}/${FFMPEG_WIN_ARCHIVE}"             "$FFMPEG_WIN_ARCHIVE")"
@@ -260,6 +281,15 @@ FFMPEG_LINUX="${CACHE_DIR}/ffmpeg_linux";                 extract_ffmpeg "$FFMPE
 FFMPEG_LINUX_AARCH64="${CACHE_DIR}/ffmpeg_linux_aarch64"; extract_ffmpeg "$FFMPEG_LINUX_AARCH64_ARCHIVE_PATH"     "ffmpeg"     "$FFMPEG_LINUX_AARCH64"
 FFMPEG_WIN="${CACHE_DIR}/ffmpeg.exe";                     extract_ffmpeg "$FFMPEG_WIN_ARCHIVE_PATH"               "ffmpeg.exe" "$FFMPEG_WIN"
 
+info "Extracting ffplay binaries"
+# macOS: ffplay is distributed as a separate zip from the same sources as ffmpeg
+FFPLAY_MACOS_X64="${CACHE_DIR}/ffplay_macos_x64";         extract_ffmpeg "$FFPLAY_MACOS_X64_ARCHIVE_PATH"         "ffplay"     "$FFPLAY_MACOS_X64"
+FFPLAY_MACOS_AARCH64="${CACHE_DIR}/ffplay_macos_aarch64"; extract_ffmpeg "$FFPLAY_MACOS_AARCH64_ARCHIVE_PATH"     "ffplay"     "$FFPLAY_MACOS_AARCH64"
+# Linux/Win: ffplay is included in the same archive as ffmpeg
+FFPLAY_LINUX="${CACHE_DIR}/ffplay_linux";                 extract_ffmpeg "$FFMPEG_LINUX_ARCHIVE_PATH"             "ffplay"     "$FFPLAY_LINUX"
+FFPLAY_LINUX_AARCH64="${CACHE_DIR}/ffplay_linux_aarch64"; extract_ffmpeg "$FFMPEG_LINUX_AARCH64_ARCHIVE_PATH"     "ffplay"     "$FFPLAY_LINUX_AARCH64"
+FFPLAY_WIN="${CACHE_DIR}/ffplay.exe";                     extract_ffmpeg "$FFMPEG_WIN_ARCHIVE_PATH"               "ffplay.exe" "$FFPLAY_WIN"
+
 info "Extracting deno binaries"
 DENO_MACOS_X64="${CACHE_DIR}/deno_macos_x64";         extract_if_needed "$DENO_MACOS_X64_PATH"       "deno"     "$DENO_MACOS_X64"         "$DENO_VERSION"
 DENO_MACOS_AARCH64="${CACHE_DIR}/deno_macos_aarch64"; extract_if_needed "$DENO_MACOS_AARCH64_PATH"   "deno"     "$DENO_MACOS_AARCH64"     "$DENO_VERSION"
@@ -274,11 +304,11 @@ DENO_WIN="${CACHE_DIR}/deno.exe";                     extract_if_needed "$DENO_W
 # Windows uses zip (Git Bash users expect it)
 
 # deno bundled for all platforms -- full binary from GitHub releases
-make_bundle "yt-download_macos_x64"  tar  "$YTDLP_MACOS" "$FFMPEG_MACOS_X64" "$DENO_MACOS_X64"
-make_bundle "yt-download_macos_aarch64"  tar  "$YTDLP_MACOS" "$FFMPEG_MACOS_AARCH64" "$DENO_MACOS_AARCH64"
-make_bundle "yt-download_linux_x64"    tar  "$YTDLP_LINUX" "$FFMPEG_LINUX"        "$DENO_LINUX_X64"
-make_bundle "yt-download_linux_aarch64"  tar  "$YTDLP_AARCH64" "$FFMPEG_LINUX_AARCH64"  "$DENO_LINUX_AARCH64"
-make_bundle "yt-download_windows"      zip  "$YTDLP_WIN"   "$FFMPEG_WIN"          "$DENO_WIN"
+make_bundle "yt-download_macos_x64"     tar  "$YTDLP_MACOS"   "$FFMPEG_MACOS_X64"     "$FFPLAY_MACOS_X64"     "$DENO_MACOS_X64"
+make_bundle "yt-download_macos_aarch64" tar  "$YTDLP_MACOS"   "$FFMPEG_MACOS_AARCH64" "$FFPLAY_MACOS_AARCH64" "$DENO_MACOS_AARCH64"
+make_bundle "yt-download_linux_x64"     tar  "$YTDLP_LINUX"   "$FFMPEG_LINUX"         "$FFPLAY_LINUX"         "$DENO_LINUX_X64"
+make_bundle "yt-download_linux_aarch64" tar  "$YTDLP_AARCH64" "$FFMPEG_LINUX_AARCH64" "$FFPLAY_LINUX_AARCH64" "$DENO_LINUX_AARCH64"
+make_bundle "yt-download_windows"       zip  "$YTDLP_WIN"     "$FFMPEG_WIN"           "$FFPLAY_WIN"           "$DENO_WIN"
 
 # ─────────────────────────────────────────────
 # Done

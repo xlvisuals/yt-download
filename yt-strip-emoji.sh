@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # yt-strip-emoji.sh -- Strip emoji from folder names, file names, and .nfo titles
 #
+# Version:   2026-05-25
+# License:   MIT <https://spdx.org/licenses/MIT.html>
+# Copyright: 2026 Axel Busch
+#
 # DESCRIPTION
 #   Jellyfin renders many Unicode emoji and pictograph characters as tofu boxes
 #   in its web UI, even when the underlying filenames are valid UTF-8. This

@@ -7,6 +7,7 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 - **`yt-download.sh`** — downloads videos, shorts, playlists, or whole channels from YouTube and ZDF Mediathek — including artwork
 - **`yt-rename.sh`** — renames downloaded files using `.info.json` sidecar metadata
 - **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering
+- **`yt-convert.sh`** — re-encodes large video files to HEVC/h.264 to reduce file size
 - **`yt-strip-emoji.sh`** — strips emoji from folder/file names and `.nfo` titles so Jellyfin displays them correctly
 - **`yt-common.sh`** — shared helper library sourced by the other scripts (not run directly)
 
@@ -28,7 +29,8 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 - Skips private or unavailable videos and continues the playlist
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
 - Channel downloads are automatically organised into a named folder
-- Bundles include ffmpeg and deno — no separate installs needed on macOS and Windows
+- Re-encodes large video files to HEVC/h.264 with hardware acceleration (VideoToolbox on macOS, NVENC on Linux/Windows)
+- Bundles include ffmpeg, ffplay, and deno — no separate installs needed on macOS and Windows
 - Detects and aborts on YouTube bot/sign-in errors with clear instructions
 - Cookie-based authentication via browser profile or cookies.txt file
 - Writes timestamped log files for easy debugging
@@ -50,11 +52,11 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 
 | Bundle | Includes |
 |--------|----------|
-| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno (Apple Silicon) |
-| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
+| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno (Apple Silicon) |
+| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
+| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
+| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
 
 Extract the archive for your platform and run the scripts from the extracted folder. No other setup required.
 
@@ -206,6 +208,7 @@ A folder with any media file, or anything over 2MB, is left untouched regardless
 | Channel `/shorts` | `ChannelName/ChannelName - Shorts/Video Title.mp4` |
 | With `-a` | `Video Title.mp3` |
 | ZDF collection | `ZDF Reportagen/Magic Pranks/Episode Title - Magic Pranks [id].mp4` |
+| ZDF movie | `ZDF Filme/Title (year).mp4` |
 
 ### Jellyfin Workflow
 
@@ -242,6 +245,8 @@ See **Authentication (Sign-in / Bot Detection)** below for details.
 ./yt-nfo.sh --all ~/Videos
 ./yt-strip-emoji.sh --all ~/Videos
 ./yt-download.sh --posters-only --yes "https://www.youtube.com/@BedtimeHistory"
+# Re-encode any large files (e.g. ZDF downloads) to save space:
+./yt-convert.sh --all ~/Videos
 ```
 
 ---
@@ -354,6 +359,78 @@ ChessKidOfficial/
     poster.jpg              <- playlist artwork
     video [VideoID].mp4
 ```
+
+---
+
+## yt-convert.sh
+
+Re-encodes video files whose bitrate exceeds a threshold, reducing file size without significant quality loss. Particularly useful for ZDF downloads, which are typically 5–6 Mbit h.264 — converting to HEVC at 2 Mbit roughly halves the file size with comparable visual quality.
+
+Uses hardware-accelerated encoding where available: VideoToolbox on macOS, NVENC on Linux and Windows (falls back to software `libx265`/`libx264` if NVENC is unavailable).
+
+Safe to re-run — files already within the target bitrate are skipped automatically. Original files are only deleted after a successful encode and verification.
+
+> **Note:** `yt-convert.sh` requires `ffmpeg` and `ffprobe` to be in `PATH` or in the same folder as the script. All bundles include both.
+
+### Usage
+
+```
+./yt-convert.sh [options] <directory>
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-n`, `--dry-run` | Show what would be converted without doing anything |
+| `-a`, `--all` | Process all files recursively under `DIR` |
+| `-4`, `--h264` | Output format h.264 (default: HEVC/h.265) |
+| `-5`, `--h265`, `--hevc` | Output format HEVC/h.265 (default) |
+| `-b`, `--bitrate RATE` | Target bitrate, e.g. `2M` or `1500K` (default: `2M`) |
+| `-t`, `--threshold RATE` | Only convert files above this bitrate (default: `3M`) |
+| `-l`, `--log DIR` | Write log to `DIR/yt-convert-TIMESTAMP.log` (default: current directory) |
+| `-h`, `--help` | Show usage |
+
+### Examples
+
+```bash
+# Preview what would be converted (dry run)
+./yt-convert.sh --dry-run ~/Videos/ZDF\ Reportagen
+
+# Convert all oversized files in a folder tree
+./yt-convert.sh ~/Videos/ZDF\ Reportagen
+
+# Use a lower threshold to also catch slightly large YouTube files
+./yt-convert.sh --threshold 2.5M ~/Videos/BedtimeHistory
+
+# Convert to h.264 instead of HEVC (e.g. for older device compatibility)
+./yt-convert.sh --h264 --bitrate 2M ~/Videos/ZDF\ Reportagen
+
+# Process multiple channels at once
+./yt-convert.sh --all ~/Videos
+
+# Write a log
+./yt-convert.sh --log ~/logs ~/Videos/ZDF\ Filme
+```
+
+### What it does
+
+For each `.mp4` file found:
+1. Reads the video stream bitrate with `ffprobe`
+2. Skips the file if bitrate is at or below the threshold
+3. Encodes to a temporary `.converting.mp4` file alongside the original
+4. Verifies the output with `ffprobe`
+5. Replaces the original only if encoding and verification succeed — the original is kept untouched on any failure
+
+Audio streams that are already `mp3`, `aac`, or `eac3` are copied unchanged. Other codecs (e.g. `opus`, `vorbis`, `ac3`) are converted to AAC 192k. All audio tracks, subtitle tracks, and attachments are preserved.
+
+### Hardware acceleration
+
+| Platform | Encoder used |
+|----------|-------------|
+| macOS | `hevc_videotoolbox` / `h264_videotoolbox` (always available) |
+| Linux / Windows with NVIDIA | `hevc_nvenc` / `h264_nvenc` |
+| Linux / Windows without NVIDIA | `libx265` / `libx264` (software, slower) |
 
 ---
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yt-download.sh -- Download YouTube videos, playlists, and channels
 #
-# Version:   2026-05-24b
+# Version:   2026-05-25
 # License:   MIT <https://spdx.org/licenses/MIT.html>
 # Copyright: 2026 Axel Busch
 #
@@ -242,6 +242,7 @@ LOG_DIR=""
 CLEANUP=false
 STRIP_EMOJI=false
 IS_ZDF=false
+ZDF_MOVIE=false   # true when BASE_URL is a ZDF film/movie URL
 
 usage() {
     cat <<EOF
@@ -323,7 +324,8 @@ post_download() {
     _POST_DOWNLOAD_DONE=true
     [[ -z "${OUT_PREFIX:-}" ]] && return
     if [[ "${SIDECAR:-false}" == true ]]; then
-        write_nfo_files "$OUT_PREFIX" "${SHOW_TITLE:-}" 2>/dev/null || true
+        # ZDF movies are flat files in the category dir -- no show/season NFO structure
+        [[ "${ZDF_MOVIE:-false}" == false ]] &&             write_nfo_files "$OUT_PREFIX" "${SHOW_TITLE:-}" 2>/dev/null || true
         fetch_posters "$OUT_PREFIX" 2>/dev/null || true
     fi
     if [[ "${STRIP_EMOJI:-false}" == true ]]; then
@@ -335,114 +337,155 @@ trap post_download EXIT
 
 # -- 5. Define Functions --
 
-# Fetch playlist and channel poster images for Jellyfin.
-# Called from --posters-only mode and after --sidecar downloads.
-fetch_posters() {
-    local out_prefix="$1"  # e.g. "ChannelName/" or ""
+# Build yt-dlp options array for poster fetching (YouTube only).
+_build_poster_opts() {  # _build_poster_opts <out_prefix>
+    local out_prefix="$1"
+    POSTER_OPTS=(
+        "--flat-playlist"
+        "--write-thumbnail"
+        "--convert-thumbnails" "jpg"
+        "--no-overwrites"
+        "--no-post-overwrites"
+        "--windows-filenames"
+        "--no-part"
+        "--quiet"
+        "--no-warnings"
+        "--extractor-args" "youtubetab:skip=authcheck"
+        "-o" "thumbnail:"
+        "-o" "pl_thumbnail:${out_prefix}%(playlist_title)s/poster.%(ext)s"
+    )
+    [[ -n "$COOKIES_FILE" ]]         && POSTER_OPTS+=("--cookies" "$COOKIES_FILE")
+    [[ -n "$COOKIES_FROM_BROWSER" ]] && POSTER_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
+    if [[ -n "${FFMPEG_BIN:-}" ]]; then
+        if [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
+            POSTER_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
+        else
+            POSTER_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
+        fi
+    fi
+    [[ -n "${DENO_BIN:-}" ]] && POSTER_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
+}
 
-    # ZDF: derive posters from already-downloaded episode thumbnail sidecars.
-    # ZDFChannelIE exposes no playlist-level thumbnail, but each episode's .jpg
-    # sidecar is already on disk. Use the first episode's thumbnail for each
-    # season folder, and the first season's poster for the show folder.
-    if [[ "$IS_ZDF" == true ]]; then
-        [[ -z "$out_prefix" || ! -d "${out_prefix%/}" ]] && return
-        local zdf_root="${out_prefix%/}"
-        # Walk show dirs (one level below root, e.g. ZDF Shows/Checkpoint/)
-        while IFS= read -r -d "" show_dir; do
-            [[ ! -d "$show_dir" ]] && continue
-            local first_season_poster=""
-            # Walk Staffel dirs inside this show, sorted numerically by staffel number
-            while IFS= read -r staffel_dir; do
-                [[ ! -d "$staffel_dir" ]] && continue
-                local season_poster="${staffel_dir}/poster.jpg"
-                if [[ ! -f "$season_poster" ]]; then
-                    # Find the first .jpg sidecar (not already named poster.jpg)
-                    local first_jpg
-                    first_jpg="$(find "$staffel_dir" -maxdepth 1 -name "*.jpg"                         ! -name "poster.jpg" | sort | head -1)"
-                    if [[ -n "$first_jpg" ]]; then
-                        cp "$first_jpg" "$season_poster"
-                        info "Written season poster: $season_poster"
-                    fi
-                fi
-                # Track the poster from the lowest-numbered season for the show folder
-                [[ -z "$first_season_poster" && -f "$season_poster" ]]                     && first_season_poster="$season_poster"
-            done < <(find "$show_dir" -maxdepth 1 -type d -name "Staffel *"                         | sort -t" " -k2 -n)
-            # Copy first-season poster to the show folder
-            local show_poster="${show_dir}/poster.jpg"
-            if [[ ! -f "$show_poster" && -n "$first_season_poster" ]]; then
-                cp "$first_season_poster" "$show_poster"
-                info "Written show poster: $show_poster"
-            fi
-        done < <(find "$zdf_root" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+# ZDF: no playlist-level thumbnail from yt-dlp; copy the first episode's .jpg
+# sidecar as poster.jpg for each Staffel folder, and the earliest season's
+# poster for the show folder. For movies, the sidecar is in the category dir itself.
+fetch_posters_zdf() {  # fetch_posters_zdf <out_prefix>
+    local out_prefix="$1"
+    [[ -z "$out_prefix" || ! -d "${out_prefix%/}" ]] && return
+    local zdf_root="${out_prefix%/}"
+    # Movies: .jpg sidecar is directly in the category dir, no show subdir
+    if [[ "$ZDF_MOVIE" == true ]]; then
+        local first_jpg
+        first_jpg="$(find "$zdf_root" -maxdepth 1 -name "*.jpg"             ! -name "poster.jpg" | sort | head -1)"
+        # No poster.jpg needed for flat movie files -- Jellyfin uses the sidecar jpg
         return
     fi
+    while IFS= read -r -d "" show_dir; do
+        [[ ! -d "$show_dir" ]] && continue
+        local show_poster="${show_dir}/poster.jpg"
+        # Movie: no Staffel subdirs -- copy the episode jpg directly as show poster
+        if ! find "$show_dir" -maxdepth 1 -type d -name "Staffel *" | grep -q .; then
+            if [[ ! -f "$show_poster" ]]; then
+                local first_jpg
+                first_jpg="$(find "$show_dir" -maxdepth 1 -name "*.jpg"                     ! -name "poster.jpg" | sort | head -1)"
+                if [[ -n "$first_jpg" ]]; then
+                    cp "$first_jpg" "$show_poster"
+                    info "Written movie poster: $show_poster"
+                fi
+            fi
+            continue
+        fi
+        # Series: copy first episode jpg per Staffel dir, then use earliest as show poster
+        local first_season_poster=""
+        while IFS= read -r staffel_dir; do
+            [[ ! -d "$staffel_dir" ]] && continue
+            local season_poster="${staffel_dir}/poster.jpg"
+            if [[ ! -f "$season_poster" ]]; then
+                local first_jpg
+                first_jpg="$(find "$staffel_dir" -maxdepth 1 -name "*.jpg" \
+                    ! -name "poster.jpg" | sort | head -1)"
+                if [[ -n "$first_jpg" ]]; then
+                    cp "$first_jpg" "$season_poster"
+                    info "Written season poster: $season_poster"
+                fi
+            fi
+            [[ -z "$first_season_poster" && -f "$season_poster" ]] \
+                && first_season_poster="$season_poster"
+        done < <(find "$show_dir" -maxdepth 1 -type d -name "Staffel *" \
+                    | sort -t" " -k2 -n)
+        if [[ ! -f "$show_poster" && -n "$first_season_poster" ]]; then
+            cp "$first_season_poster" "$show_poster"
+            info "Written show poster: $show_poster"
+        fi
+    done < <(find "$zdf_root" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+}
 
-    # Fetch channel-level poster.jpg if we have a channel output directory
+# YouTube: fetch channel poster via yt-dlp thumbnail download, then fetch
+# per-playlist posters by building a playlist-title -> URL map.
+fetch_posters_youtube() {  # fetch_posters_youtube <out_prefix>
+    local out_prefix="$1"
+
+    # Channel-level poster
     if [[ -n "$out_prefix" ]]; then
         local channel_dir="${out_prefix%/}"
-        [[ ! -d "$channel_dir" ]] && return  # skip if channel folder not yet created
-        channel_dir="$(cd "$channel_dir" && pwd)"  # absolute path avoids yt-dlp appending channel name
+        [[ ! -d "$channel_dir" ]] && return
+        channel_dir="$(cd "$channel_dir" && pwd)"
         local channel_poster="${channel_dir}/poster.jpg"
         if [[ ! -f "$channel_poster" ]]; then
-            # Only fetch channel poster if BASE_URL is a YouTube channel URL
             if [[ "$BASE_URL" != *"/@"* ]]; then
                 info "Skipping channel poster (not a channel URL)"
-                return
-            fi
-            info "Fetching channel poster..."
-            local _tmp="${BASE_URL#*/@}"
-            local _handle="${_tmp%%/*}"
-            local channel_url="https://www.youtube.com/@${_handle}"
-            set +e
-            "$YTDLP_BIN" \
-                "--skip-download" \
-                "--write-thumbnail" \
-                "--convert-thumbnails" "jpg" \
-                "--playlist-items" "0" \
-                "--quiet" \
-                "-o" "${channel_poster}" \
-                "$channel_url" 2>&1
-            set -e
-            if [[ -f "$channel_poster" ]]; then
-                info "Written channel poster: $channel_poster"
             else
-                info "Could not fetch channel poster for $channel_url. Attempted to write to '$channel_poster'"
+                info "Fetching channel poster..."
+                local _tmp="${BASE_URL#*/@}"
+                local _handle="${_tmp%%/*}"
+                local channel_url="https://www.youtube.com/@${_handle}"
+                set +e
+                "$YTDLP_BIN" \
+                    "--skip-download" \
+                    "--write-thumbnail" \
+                    "--convert-thumbnails" "jpg" \
+                    "--playlist-items" "0" \
+                    "--quiet" \
+                    "-o" "${channel_poster}" \
+                    "$channel_url" 2>&1
+                set -e
+                if [[ -f "$channel_poster" ]]; then
+                    info "Written channel poster: $channel_poster"
+                else
+                    info "Could not fetch channel poster for $channel_url. Attempted to write to '$channel_poster'"
+                fi
             fi
         else
             info "Channel poster already present at '$channel_poster'."
         fi
     fi
 
-    # Build a map of playlist_title -> playlist_url in one yt-dlp call,
-    # then only fetch posters for playlists whose folder already exists locally.
-    if [[ -n "$out_prefix" && -d "${out_prefix%/}" ]]; then
+    # Per-playlist posters
+    _build_poster_opts "$out_prefix"
 
-        # Build poster fetch opts
-        local POSTER_OPTS=(
-            "--flat-playlist"
-            "--write-thumbnail"
-            "--convert-thumbnails" "jpg"
-            "--no-overwrites"
-            "--no-post-overwrites"
-            "--windows-filenames"
-            "--no-part"
-            "--quiet"
-            "--no-warnings"
-            "--extractor-args" "youtubetab:skip=authcheck"
-            "-o" "thumbnail:"
-            "-o" "pl_thumbnail:${out_prefix}%(playlist_title)s/poster.%(ext)s"
-        )
-        [[ -n "$COOKIES_FILE" ]]         && POSTER_OPTS+=("--cookies" "$COOKIES_FILE")
-        [[ -n "$COOKIES_FROM_BROWSER" ]] && POSTER_OPTS+=("--cookies-from-browser" "$COOKIES_FROM_BROWSER")
-        if [[ -n "${FFMPEG_BIN:-}" ]]; then
-            if [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
-                POSTER_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
+    # Direct playlist URL (e.g. youtube.com/playlist?list=...): the output folder
+    # IS the playlist -- fetch its thumbnail straight into poster.jpg there.
+    if [[ "$BASE_URL" == *"youtube.com/playlist?list="* ]]; then
+        local pl_poster="${out_prefix%/}/poster.jpg"
+        if [[ -f "$pl_poster" ]]; then
+            info "Playlist poster already present at '$pl_poster'."
+        else
+            info "Fetching playlist poster..."
+            set +e
+            "$YTDLP_BIN"                 "--skip-download"                 "--write-thumbnail"                 "--convert-thumbnails" "jpg"                 "--playlist-items" "0"                 "--quiet"                 "-o" "$pl_poster"                 "$BASE_URL" 2>&1
+            set -e
+            if [[ -f "$pl_poster" ]]; then
+                info "Written playlist poster: $pl_poster"
             else
-                POSTER_OPTS+=("--ffmpeg-location" "$(dirname "$FFMPEG_BIN")")
+                info "Could not fetch playlist poster for $BASE_URL"
             fi
         fi
-        [[ -n "${DENO_BIN:-}" ]] && POSTER_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
+        return
+    fi
 
+    # Channel URL: build a map of playlist_title -> URL and fetch a poster
+    # for each playlist subfolder that exists on disk.
+    if [[ -n "$out_prefix" && -d "${out_prefix%/}" ]]; then
         info "Building playlist map for posters..."
         local playlist_map
         playlist_map="$("$YTDLP_BIN" \
@@ -450,15 +493,12 @@ fetch_posters() {
             --print "playlist_title=%(title)s ; playlist_url=%(url)s" \
             --quiet --no-warnings \
             "$BASE_URL" 2>/dev/null || true)"
-
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             local pl_title pl_url
             pl_title="${line#playlist_title=}"
             pl_title="${pl_title% ; playlist_url=*}"
             pl_url="${line##*; playlist_url=}"
-            # yt-dlp --windows-filenames replaces | with ｜ (U+FF5C fullwidth).
-            # Normalise the title to match the actual folder name on disk.
             local pl_title_fs
             pl_title_fs="$(echo "$pl_title" \
                 | sed 's/|/｜/g' \
@@ -480,7 +520,6 @@ fetch_posters() {
             set -e
         done <<< "$playlist_map"
     else
-        # No out_prefix -- iterate URLs directly
         for url in "${urls[@]}"; do
             info "Fetching poster: $url"
             set +e
@@ -488,17 +527,32 @@ fetch_posters() {
             set -e
         done
     fi
+}
 
+# Fetch playlist and channel poster images for Jellyfin.
+# Called from --posters-only mode and after --sidecar downloads.
+fetch_posters() {  # fetch_posters <out_prefix>
+    local out_prefix="$1"
+    if [[ "$IS_ZDF" == true ]]; then
+        fetch_posters_zdf "$out_prefix"
+    else
+        fetch_posters_youtube "$out_prefix"
+    fi
 }
 
 
 # Escape special XML characters for safe embedding in NFO file elements.
-xml_escape() {
+# Escape characters that are special in XML content: & < >
+# (single/double quotes are only special inside attribute values, which we don't use)
+#
+# Bash 5.2+ treats unquoted '&' in the replacement string as the matched text
+# (sed-style backreference) when the patsub_replacement shopt is on (default).
+# Backslash-escaping it forces a literal '&' across all bash versions.
+xml_escape() {  # xml_escape <string>
     local s="$1"
-    s="${s//&/&amp;}"
-    s="${s//</'&lt;'}"
-    s="${s//>/'&gt;'}"
-    s="${s//'"'/'&quot;'}"
+    s="${s//&/\&amp;}"   # MUST be first -- the others insert & themselves
+    s="${s//</\&lt;}"
+    s="${s//>/\&gt;}"
     echo "$s"
 }
 
@@ -511,88 +565,119 @@ xml_escape() {
 # If show_title is empty, falls back to the basename of the output directory.
 # Use this override when the human-readable channel display name differs from
 # the folder name (e.g. user passed -o, or channel name detection succeeded).
-write_nfo_files() {  # write_nfo_files <out_prefix> [<show_title>]
-    info "Writing .nfo files..."
-    local out_prefix="$1"
-    local show_title_arg="${2:-}"
-    local root_dir="${out_prefix%/}"
-    [[ -z "$root_dir" ]] && root_dir="."
+# ZDF: tvshow.nfo per show dir, season.nfo per Staffel dir with year remapping.
+# Structure: root/ -> show/ -> Staffel N/
+write_nfo_files_zdf() {  # write_nfo_files_zdf <root_dir>
+    local root_dir="$1"
+    while IFS= read -r -d "" show_dir; do
+        [[ ! -d "$show_dir" ]] && continue
+        local show_name
+        show_name="$(basename "$show_dir")"
 
-    # tvshow.nfo in the root (channel) folder
+        local tvshow_nfo="${show_dir}/tvshow.nfo"
+        if [[ ! -f "$tvshow_nfo" ]]; then
+            printf '<?xml version="1.0" encoding="utf-8"?>\n<tvshow>\n  <title>%s</title>\n</tvshow>\n' \
+                "$(xml_escape "$show_name")" > "$tvshow_nfo"
+            echo "Written: $tvshow_nfo"
+        fi
+
+        # Collect Staffel numbers to detect year-based seasons
+        local -a _staffel_nums=()
+        local _has_year_season=false
+        while IFS= read -r staffel_dir; do
+            [[ ! -d "$staffel_dir" ]] && continue
+            has_media_files "$staffel_dir" || continue
+            local _t; _t="$(basename "$staffel_dir")"
+            if [[ "$_t" =~ ^Staffel[[:space:]]+([0-9]+)$ ]]; then
+                _staffel_nums+=("${BASH_REMATCH[1]}")
+                [[ "${BASH_REMATCH[1]}" -ge 1900 ]] && _has_year_season=true
+            fi
+        done < <(find "$show_dir" -maxdepth 1 -type d -name "Staffel *" | sort -t" " -k2 -n)
+
+        local -A _staffel_ordinal=()
+        if [[ "$_has_year_season" == true && ${#_staffel_nums[@]} -gt 0 ]]; then
+            local _ordinal=0
+            while IFS= read -r _n; do
+                (( _ordinal++ )) || true
+                _staffel_ordinal["$_n"]="$_ordinal"
+            done < <(printf '%s\n' "${_staffel_nums[@]}" | sort -n)
+        fi
+
+        # If there are no Staffel subdirs the show dir contains a movie directly --
+        # tvshow.nfo is already written above; no season.nfo needed.
+        local _has_staffel=false
+        while IFS= read -r staffel_dir; do
+            [[ -d "$staffel_dir" ]] && { _has_staffel=true; break; }
+        done < <(find "$show_dir" -maxdepth 1 -type d -name "Staffel *")
+        [[ "$_has_staffel" == false ]] && continue
+
+        while IFS= read -r staffel_dir; do
+            [[ ! -d "$staffel_dir" ]] && continue
+            has_media_files "$staffel_dir" || continue
+            local staffel_title season_num
+            staffel_title="$(basename "$staffel_dir")"
+            if [[ "$staffel_title" =~ ^Staffel[[:space:]]+([0-9]+)$ ]]; then
+                local _raw="${BASH_REMATCH[1]}"
+                if [[ -n "${_staffel_ordinal[$_raw]+x}" ]]; then
+                    season_num="${_staffel_ordinal[$_raw]}"
+                else
+                    season_num="$_raw"
+                fi
+            else
+                season_num=1
+            fi
+            local season_nfo="${staffel_dir}/season.nfo"
+            if [[ ! -f "$season_nfo" ]]; then
+                printf '<?xml version="1.0" encoding="utf-8"?>\n<season>\n  <title>%s</title>\n  <seasonnumber>%d</seasonnumber>\n</season>\n' \
+                    "$(xml_escape "$staffel_title")" "$season_num" > "$season_nfo"
+                echo "Written: $season_nfo (Season ${season_num}: ${staffel_title})"
+            fi
+        done < <(find "$show_dir" -maxdepth 1 -type d -name "Staffel *" | sort -t" " -k2 -n)
+
+    done < <(find "$root_dir" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+}
+
+# YouTube: tvshow.nfo in channel root, season.nfo per playlist dir (sequential).
+# Structure: root/ -> Playlist Name/
+write_nfo_files_youtube() {  # write_nfo_files_youtube <root_dir> [<show_title>]
+    local root_dir="$1"
+    local show_title_arg="${2:-}"
+
     local tvshow_nfo="${root_dir}/tvshow.nfo"
     if [[ ! -f "$tvshow_nfo" ]]; then
         local show_title
-        if [[ -n "$show_title_arg" ]]; then
-            show_title="$show_title_arg"
-        else
-            show_title="$(basename "$root_dir")"
-        fi
+        show_title="${show_title_arg:-$(basename "$root_dir")}"
         printf '<?xml version="1.0" encoding="utf-8"?>\n<tvshow>\n  <title>%s</title>\n</tvshow>\n' \
             "$(xml_escape "$show_title")" > "$tvshow_nfo"
         echo "Written: $tvshow_nfo"
     fi
 
-
-    # season.nfo in each playlist subfolder that contains media.
-    # For ZDF shows the subfolders are named "Staffel N" where N is either an ordinal
-    # (1, 2, 3...) or a year (2023, 2024, 2025...). Jellyfin expects small ordinals in
-    # <seasonnumber>, so year-based seasons are remapped to 1, 2, 3... in sort order
-    # while keeping the original "Staffel 2025" as the display title.
-    # For YouTube (non-Staffel folders) we assign sequentially as before.
-
-    # Pass 1: collect Staffel numbers for all dirs with media to detect year-based seasons
-    local -a _staffel_dirs=()
-    local -a _staffel_nums=()
-    local _has_year_season=false
-    while IFS= read -r -d "" playlist_dir; do
-        has_media_files "$playlist_dir" || continue
-        local _t
-        _t="$(basename "$playlist_dir")"
-        if [[ "$_t" =~ ^Staffel[[:space:]]+([0-9]+)$ ]]; then
-            _staffel_dirs+=("$playlist_dir")
-            _staffel_nums+=("${BASH_REMATCH[1]}")
-            [[ "${BASH_REMATCH[1]}" -ge 1900 ]] && _has_year_season=true
-        fi
-    done < <(find "$root_dir" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
-
-    # If any Staffel number looks like a year, remap all of them to ordinals (sorted)
-    # Build an associative array: raw_number -> ordinal
-    local -A _staffel_ordinal=()
-    if [[ "$_has_year_season" == true && ${#_staffel_nums[@]} -gt 0 ]]; then
-        local _ordinal=0
-        # Sort the raw numbers numerically, assign ordinals in that order
-        while IFS= read -r _n; do
-            (( _ordinal++ )) || true
-            _staffel_ordinal["$_n"]="$_ordinal"
-        done < <(printf '%s
-' "${_staffel_nums[@]}" | sort -n)
-    fi
-
-    # Pass 2: write season.nfo for every subdir with media
     local season_num=0
     while IFS= read -r -d "" playlist_dir; do
         has_media_files "$playlist_dir" || continue
         local playlist_title
         playlist_title="$(basename "$playlist_dir")"
-        if [[ "$playlist_title" =~ ^Staffel[[:space:]]+([0-9]+)$ ]]; then
-            local _raw="${BASH_REMATCH[1]}"
-            if [[ -n "${_staffel_ordinal[$_raw]+x}" ]]; then
-                season_num="${_staffel_ordinal[$_raw]}"   # year remapped to ordinal
-            else
-                season_num="$_raw"                        # plain ordinal, use as-is
-            fi
-        else
-            (( season_num++ )) || true                    # YouTube: sequential
-        fi
+        (( season_num++ )) || true
         printf '<?xml version="1.0" encoding="utf-8"?>\n<season>\n  <title>%s</title>\n  <seasonnumber>%d</seasonnumber>\n</season>\n' \
             "$(xml_escape "$playlist_title")" "$season_num" > "${playlist_dir}/season.nfo"
         echo "Written: ${playlist_dir}/season.nfo (Season ${season_num}: ${playlist_title})"
     done < <(find "$root_dir" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 }
 
-# Run yt-strip-emoji.sh on the output prefix to clean folder/file names
-# and .nfo titles. Called from post_download() when --strip-emoji is set.
-# Quietly skipped if the script isn't alongside this one.
+# Write tvshow.nfo and season.nfo files for Jellyfin.
+# Called once after all downloads complete when --sidecar is set.
+write_nfo_files() {  # write_nfo_files <out_prefix> [<show_title>]
+    info "Writing .nfo files..."
+    local out_prefix="$1"
+    local show_title_arg="${2:-}"
+    local root_dir="${out_prefix%/}"
+    [[ -z "$root_dir" ]] && root_dir="."
+    if [[ "$IS_ZDF" == true ]]; then
+        write_nfo_files_zdf "$root_dir"
+    else
+        write_nfo_files_youtube "$root_dir" "$show_title_arg"
+    fi
+}
 strip_emoji() {
     local strip_script="${SCRIPT_DIR}/yt-strip-emoji.sh"
     if [[ ! -x "$strip_script" ]]; then
@@ -637,12 +722,17 @@ build_template() {  # build_template <in_playlist: true|false>
     # Append [VideoID] if requested
     [[ "$KEEP_ID" == true ]] && stem="${stem} [%(id)s]"
 
-    # Prepend playlist folder(s) for playlist downloads.
-    # For ZDF: series/Staffel N/ -- season_number is always populated by yt-dlp's
-    # ZDF extractor, so this works for both single- and multi-season shows.
-    # For YouTube: playlist_title/ with series fallback (no season subfolder).
-    if [[ "$in_playlist" == true ]]; then
+    # Build the full output path depending on download type.
+    if [[ "$in_playlist" == movie ]]; then
+        # ZDF movie: flat into category dir, filename is "Series (year)"
+        echo "%(series)s (%(release_year,upload_date>%Y)s).%(ext)s"
+    elif [[ "$in_playlist" == true ]]; then
         if [[ "$IS_ZDF" == true ]]; then
+            # ZDF series: series/Staffel N/stem
+            # Use literal slashes in the template (path separators) rather than
+            # producing "/" via a conditional substitution -- yt-dlp sanitises
+            # slash characters from field evaluation into ⧸ (U+29F8 BIG SOLIDUS).
+            # Movies never reach this branch (they use build_template "movie").
             echo "%(series)s/Staffel %(season_number)s/${stem}.%(ext)s"
         else
             echo "%(playlist_title,series)s/${stem}.%(ext)s"
@@ -680,6 +770,8 @@ classify_url() {  # classify_url <url>
             echo video
         elif [[ "$url" == *"?staffel="* ]]; then
             echo playlist
+        elif [[ "$ZDF_MOVIE" == true ]]; then
+            echo movie
         else
             echo show
         fi
@@ -688,7 +780,6 @@ classify_url() {  # classify_url <url>
     fi
 }
 
-# Run the full download+sidecar process for a given URL list and prefix
 # Run the full download+sidecar process for a list of URLs and a prefix.
 # Bash 3.2 compatible -- no namerefs. URLs passed as positional args after prefix.
 run_download() {  # run_download <out_prefix> <url1> [<url2> ...]
@@ -700,6 +791,7 @@ run_download() {  # run_download <out_prefix> <url1> [<url2> ...]
         OPTS=("${BASE_OPTS[@]}")
         case "$(classify_url "$url")" in
             playlist|show) OPTS+=("--yes-playlist"); OUT_TEMPLATE="${_prefix}$(build_template true)"  ;;
+            movie)         OPTS+=("--no-playlist");  OUT_TEMPLATE="${_prefix}$(build_template movie)" ;;
             video)         OPTS+=("--no-playlist");  OUT_TEMPLATE="${_prefix}$(build_template false)" ;;
         esac
         check_dir="${_prefix:-.}"
@@ -780,29 +872,45 @@ fi
 #   3. Channel handle from URL (e.g. "BBCEarthKids" from /@BBCEarthKids/...)
 #   4. Fallback to "download/" with a warning -- we never want OUT_PREFIX empty,
 #      because --cleanup and --strip-emoji refuse to run on the current directory.
-#
-# Note: step 2 always runs (even for /@Handle/ URLs) because the display name
-# tends to be more readable and matches what users see in Jellyfin.
 
 CHANNEL_NAME=""
 URL_HANDLE=""  # fallback for /@Handle/ URLs if yt-dlp can't return a display name
 SHOW_TITLE=""  # what to write to tvshow.nfo; defaults to folder basename if empty
 
-if [[ -n "$OUTPUT_DIR" ]]; then
-    mkdir -p "$OUTPUT_DIR" || die "Cannot create output directory: $OUTPUT_DIR"
-    OUT_PREFIX="${OUTPUT_DIR}/"
-    # User chose the folder name explicitly -- respect it for the nfo title too
-else
-    # If this is a /@Handle/ URL, capture the handle as a fallback first
+# Resolve output dir for ZDF: derive category name from the URL path segment.
+# e.g. https://www.zdf.de/reportagen/magic-pranks-100 -> "ZDF Reportagen"
+# Must run before any yt-dlp metadata call; playlist_title returns the show name
+# which is correct for the subfolder but not the root folder.
+resolve_output_dir_zdf() {
+    IS_ZDF=true
+    local _path="${BASE_URL#*zdf.de/}"
+    # Detect movie URLs by category segment (e.g. /filme/)
+    local _cat="${_path%%/*}"
+    [[ "$_cat" == "filme" || "$_cat" == "films" ]] && ZDF_MOVIE=true
+    _path="${_path%%\?*}"
+    _path="${_path%/}"
+    local _category="${_path%%/*}"
+    local _title
+    _title="$(echo "$_category" | tr '-' ' ' | \
+        awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')"
+    CHANNEL_NAME="ZDF ${_title}"
+    SHOW_TITLE="$CHANNEL_NAME"
+    CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
+    info "Output directory from ZDF URL category: $CHANNEL_NAME"
+}
+
+# Resolve output dir for YouTube: ask yt-dlp for the uploader display name,
+# with handle and "download/" as fallbacks.
+resolve_output_dir_youtube() {
+    # Capture /@Handle as fallback before the yt-dlp call
     if [[ "$BASE_URL" == *"/@"* ]]; then
         URL_HANDLE="$(echo "$BASE_URL" | sed 's|.*/@||; s|/.*||')"
 
-        # If URL has no path after the channel handle, prompt for what to download
+        # Bare channel URL (no endpoint) -- prompt for which sections to download
         if [[ "$BASE_URL" =~ ^https://www\.youtube\.com/@[^/]+/?$ ]]; then
-            CHANNEL_HANDLE="${BASE_URL%/}"
-            CHANNEL_HANDLE="${CHANNEL_HANDLE##*/}"  # just @Name
+            local CHANNEL_HANDLE="${BASE_URL%/}"
+            CHANNEL_HANDLE="${CHANNEL_HANDLE##*/}"
             BASE_CHANNEL_URL="${BASE_URL%/}"
-            # Build list of endpoints to download
             ENDPOINTS=()
             if [[ "$FORCE_YES" == true ]]; then
                 ENDPOINTS=("playlists" "videos" "shorts")
@@ -813,45 +921,37 @@ else
                 done
             fi
             [[ ${#ENDPOINTS[@]} -eq 0 ]] && { echo "Nothing selected. Bye."; exit 0; }
-            # Set BASE_URL to first endpoint; remaining handled after main loop
             BASE_URL="${BASE_CHANNEL_URL}/${ENDPOINTS[0]}"
             info "Will download: ${ENDPOINTS[*]}"
         fi
     fi
 
-    # For ZDF URLs derive the root folder directly from the URL category segment --
-    # e.g. https://www.zdf.de/reportagen/magic-pranks-100 -> "ZDF Reportagen".
-    # This must run before the yt-dlp metadata lookup because playlist_title returns
-    # the show name ("Magic Pranks"), which is correct for the subfolder but not the
-    # root. The show name reaches the subfolder via %(series)s in the output template.
-    if [[ "$BASE_URL" == *"zdf.de/"* ]]; then
-        IS_ZDF=true
-        _zdf_path="${BASE_URL#*zdf.de/}"  # strip scheme+host
-        _zdf_path="${_zdf_path%%\?*}"     # strip query string
-        _zdf_path="${_zdf_path%/}"        # strip trailing slash
-        _zdf_category="${_zdf_path%%/*}"  # first path segment = category
-        _zdf_category_title="$(echo "$_zdf_category" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')"
-        CHANNEL_NAME="ZDF ${_zdf_category_title}"
+    info "Detecting channel name from URL metadata..."
+    CHANNEL_NAME="$("$YTDLP_BIN" --flat-playlist --playlist-items 1 --print uploader \
+        "$BASE_URL" 2>/dev/null | head -1)"
+
+    if [[ -n "$CHANNEL_NAME" && "$CHANNEL_NAME" != "NA" ]]; then
         SHOW_TITLE="$CHANNEL_NAME"
         CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
-        info "Output directory from ZDF URL category: $CHANNEL_NAME"
+        info "Using channel display name as output directory: $CHANNEL_NAME"
+    elif [[ -n "$URL_HANDLE" ]]; then
+        CHANNEL_NAME="$(sanitise "$URL_HANDLE")"
+        info "Could not detect channel display name -- using URL handle: $CHANNEL_NAME"
     else
-        # For YouTube and others, ask yt-dlp for the channel/uploader display name.
-        info "Detecting channel name from URL metadata..."
-        CHANNEL_NAME="$("$YTDLP_BIN" --flat-playlist --playlist-items 1 --print uploader "$BASE_URL" 2>/dev/null | head -1)"
+        CHANNEL_NAME="download"
+        info "WARNING: Could not detect channel name -- using fallback 'download/'"
+        info "         (use -o DIR to pick a specific output directory)"
+    fi
+}
 
-        if [[ -n "$CHANNEL_NAME" && "$CHANNEL_NAME" != "NA" ]]; then
-            SHOW_TITLE="$CHANNEL_NAME"
-            CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
-            info "Using channel display name as output directory: $CHANNEL_NAME"
-        elif [[ -n "$URL_HANDLE" ]]; then
-            CHANNEL_NAME="$(sanitise "$URL_HANDLE")"
-            info "Could not detect channel display name -- using URL handle: $CHANNEL_NAME"
-        else
-            CHANNEL_NAME="download"
-            info "WARNING: Could not detect channel name -- using fallback 'download/'"
-            info "         (use -o DIR to pick a specific output directory)"
-        fi
+if [[ -n "$OUTPUT_DIR" ]]; then
+    mkdir -p "$OUTPUT_DIR" || die "Cannot create output directory: $OUTPUT_DIR"
+    OUT_PREFIX="${OUTPUT_DIR}/"
+else
+    if [[ "$BASE_URL" == *"zdf.de/"* ]]; then
+        resolve_output_dir_zdf
+    else
+        resolve_output_dir_youtube
     fi
     mkdir -p "$CHANNEL_NAME" || die "Cannot create output directory: $CHANNEL_NAME"
     OUT_PREFIX="${CHANNEL_NAME}/"
@@ -860,36 +960,18 @@ fi
 
 # -- 8. Fetch playlist list --
 
-# For channel pages, expand into individual playlist URLs.
-# For direct playlist or video URLs, use as-is -- the flat-playlist
-# expansion would incorrectly treat video IDs as playlist IDs.
-info "Fetching content from $BASE_URL"
-
-urls=()
-
-if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
-      "$BASE_URL" == *"youtube.com/watch?"* || \
-      "$BASE_URL" == *"youtu.be/"* || \
-      "$BASE_URL" == *"/@"*"/videos" || \
-      "$BASE_URL" == *"/@"*"/shorts" ]] || \
-   [[ "$IS_ZDF" == true && ( "$BASE_URL" == *"?staffel="* || \
-                              "$BASE_URL" == *"zdf.de/video/"* || \
-                              "$BASE_URL" == *"zdf.de/play/"* || \
-                              "$BASE_URL" == *".html" ) ]]; then
-    # Direct playlist, video, /videos or /shorts URL -- use as-is, no expansion needed.
-    # For ZDF: ?staffel= (single season) and individual video URLs are also used as-is.
+# Direct URL (single video, playlist, or ZDF season): use as-is.
+expand_urls_direct() {
     urls=("$BASE_URL")
+}
 
-elif [[ "$IS_ZDF" == true && "$BASE_URL" != *"?staffel="* && "$BASE_URL" != *"/play/"* ]]; then
-    # ZDF show URL (no ?staffel, no /play/) -- discover all seasons.
-    # yt-dlp's ZDFChannelIE fetches ALL seasons from the GraphQL API when no
-    # ?staffel is given, so --flat-playlist returns episodes from every season,
-    # each tagged with season_number. We collect the unique season_number values
-    # and construct ?staffel=N URLs (one per season) so each season is downloaded
-    # as its own playlist with the correct Staffel N subfolder.
+# ZDF show URL: discover all seasons via --flat-playlist and construct
+# ?staffel=N URLs. yt-dlp's ZDFChannelIE returns episodes from all seasons
+# when no ?staffel is given, each tagged with season_number.
+expand_urls_zdf_show() {
     info "Discovering seasons for $BASE_URL ..."
-    _show_base="${BASE_URL%%\?*}"  # strip any stray query string
-    stderr_tmp="$(mktemp)"
+    local _show_base="${BASE_URL%%\?*}"
+    local stderr_tmp; stderr_tmp="$(mktemp)"
     declare -A _seen_seasons=()
     while IFS= read -r _snum; do
         [[ -z "$_snum" || "$_snum" == "NA" ]] && continue
@@ -898,55 +980,67 @@ elif [[ "$IS_ZDF" == true && "$BASE_URL" != *"?staffel="* && "$BASE_URL" != *"/p
             urls+=("${_show_base}?staffel=${_snum}")
         fi
     done < <(
-        "$YTDLP_BIN" \
-            --flat-playlist \
-            --print "%(season_number)s" \
+        "$YTDLP_BIN" --flat-playlist --print "%(season_number)s" \
             "$BASE_URL" 2>"$stderr_tmp"
     )
-
     if [[ ${#urls[@]} -eq 0 ]]; then
         if grep -qi "error\|failed\|unable" "$stderr_tmp" 2>/dev/null; then
-            cat "$stderr_tmp" >&2
-            rm -f "$stderr_tmp"
+            cat "$stderr_tmp" >&2; rm -f "$stderr_tmp"
             die "yt-dlp reported an error while fetching '$BASE_URL'. Check the URL and your connection."
         fi
-        # No seasons found -- fall back to the show URL directly
         info "Could not enumerate seasons -- downloading show URL directly"
         urls=("$BASE_URL")
     fi
     rm -f "$stderr_tmp"
-
-    # Sort season URLs numerically by their staffel= value so they are presented
-    # and downloaded in chronological order
+    # Sort by staffel= value so seasons download in chronological order
     IFS=$'\n' urls=($(printf '%s\n' "${urls[@]}" | sort -t= -k2 -n)); unset IFS
+}
 
-else
-    # YouTube channel page or other -- expand into individual playlist URLs.
+# YouTube channel page (or other non-ZDF multi-playlist source): expand into
+# individual playlist URLs via --flat-playlist.
+expand_urls_youtube_channel() {
+    local _print_template
     if [[ "$BASE_URL" == *"youtube.com"* || "$BASE_URL" == *"youtu.be"* ]]; then
-        _url_print_template="https://www.youtube.com/playlist?list=%(id)s"
+        _print_template="https://www.youtube.com/playlist?list=%(id)s"
     else
-        _url_print_template="%(url)s"
+        _print_template="%(url)s"
     fi
-
-    stderr_tmp="$(mktemp)"
+    local stderr_tmp; stderr_tmp="$(mktemp)"
     while IFS= read -r line; do
         [[ -n "$line" ]] && urls+=("$line")
     done < <(
-        "$YTDLP_BIN" \
-            --flat-playlist \
-            --print "$_url_print_template" \
+        "$YTDLP_BIN" --flat-playlist --print "$_print_template" \
             "$BASE_URL" 2>"$stderr_tmp"
     )
-
     if [[ ${#urls[@]} -eq 0 ]]; then
         if grep -qi "error\|failed\|unable" "$stderr_tmp" 2>/dev/null; then
-            cat "$stderr_tmp" >&2
-            rm -f "$stderr_tmp"
+            cat "$stderr_tmp" >&2; rm -f "$stderr_tmp"
             die "yt-dlp reported an error while fetching '$BASE_URL'. Check the URL and your connection."
         fi
         urls=("$BASE_URL")
     fi
     rm -f "$stderr_tmp"
+}
+
+info "Fetching content from $BASE_URL"
+urls=()
+
+# Route to the right expansion strategy based on URL type
+_url_no_qs="${BASE_URL%%\?*}"
+if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
+      "$BASE_URL" == *"youtube.com/watch?"* || \
+      "$BASE_URL" == *"youtu.be/"* || \
+      "$BASE_URL" == *"/@"*"/videos" || \
+      "$BASE_URL" == *"/@"*"/shorts" ]] || \
+   [[ "$IS_ZDF" == true && ( "$BASE_URL" == *"?staffel="* || \
+                              "$_url_no_qs" == *"zdf.de/video/"* || \
+                              "$_url_no_qs" == *"zdf.de/play/"* || \
+                              "$_url_no_qs" == *".html" ) ]]; then
+    expand_urls_direct
+elif [[ "$IS_ZDF" == true ]]; then
+    expand_urls_zdf_show
+else
+    expand_urls_youtube_channel
 fi
 
 [[ ${#urls[@]} -eq 0 || -z "${urls[0]}" ]] && die "No valid URLs found for '$BASE_URL'."
