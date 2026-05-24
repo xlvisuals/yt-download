@@ -407,7 +407,7 @@ fetch_posters() {
                 | sed 's/|/｜/g' \
                 | sed 's/[\\/:*?"<>]/_/g' \
                 | sed 's/  */ /g' \
-                | sed 's/[. ]*$//)"
+                | sed 's/[. ]*$//')"
             local pl_dir="${out_prefix%/}/${pl_title_fs}"
             if [[ ! -d "$pl_dir" ]]; then
                 echo "  Skipping $pl_title (playlist not downloaded)"
@@ -544,12 +544,12 @@ run_download() {  # run_download <url_list_varname> <out_prefix>
         check_disk_space "$check_dir" 100
 
         info "Processing: $url"
-        local ytdlp_out
+        local ytdlp_out ytdlp_exit
         ytdlp_out="$(mktemp)"
         set +e
         "$YTDLP_BIN" "${OPTS[@]}" --ignore-errors -o "$OUT_TEMPLATE" "$url" 2>&1 \
             | tee "$ytdlp_out"
-        local ytdlp_exit="${PIPESTATUS[0]}"
+        ytdlp_exit="${PIPESTATUS[0]}"
         set -e
         # Exit code 1: some videos skipped (private/unavailable) -- continue
         # Exit code 101: --max-downloads reached -- continue
