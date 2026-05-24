@@ -24,7 +24,7 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 - Saves `.info.json` and thumbnail sidecars for Jellyfin and similar media servers
 - Generates Jellyfin `season.nfo` files to fix incorrect season numbering
 - Strips emoji from folder/file names and `.nfo` titles for Jellyfin compatibility
-- Saves `poster.jpg` in channel and playlist folders for series/season artwork
+- Saves `poster.jpg` in channel and playlist folders for series/season artwork (YouTube: fetched from yt-dlp; ZDF: copied from the first episode's thumbnail sidecar, so `--sidecar` must be active)
 - Skips private or unavailable videos and continues the playlist
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
 - Channel downloads are automatically organised into a named folder
@@ -156,6 +156,8 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ./yt-download.sh --jellyfin "https://www.zdf.de/serien/the-rookie"
 ```
 ZDF URLs are detected automatically. The output folder is named from the URL category (`ZDF Reportagen`, `ZDF Serien`, etc.) with the show as a subfolder.
+
+> **ZDF poster artwork:** ZDF's API does not expose dedicated show or season poster images. Instead, the script copies the first downloaded episode's thumbnail as `poster.jpg` into each season folder, and the earliest season's poster into the show folder. This requires `--sidecar` (included in `--jellyfin`) to be active — without it, no thumbnails are downloaded and no posters are created. `--posters-only` has no effect on ZDF URLs for the same reason.
 
 **Test with just 3 videos per playlist:**
 ```bash
