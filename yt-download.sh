@@ -6,9 +6,10 @@
 # Copyright: 2026 Axel Busch
 #
 # DESCRIPTION
-#   Downloads YouTube content using yt-dlp. Handles single videos, playlists,
-#   and entire channel libraries. Automatically downloads and manages yt-dlp,
-#   ffmpeg, and deno if bundled versions are present in the same directory.
+#   Downloads YouTube and ZDF Mediathek content using yt-dlp. Handles single
+#   videos, playlists, and entire channel/collection libraries. Automatically
+#   downloads and manages yt-dlp, ffmpeg, and deno if bundled versions are
+#   present in the same directory.
 #
 # USAGE
 #   ./yt-download.sh [options] <URL>
@@ -18,17 +19,19 @@
 #   -u, --update       Update yt-dlp and deno before running (URL optional)
 #   -a, --audio        Download audio only as MP3
 #   -s, --sidecar      Save .info.json and thumbnail alongside each video
-#   -p, --posters-only      Download folder poster images only (no videos)
+#   -p, --posters-only Download folder poster images only (no videos)
 #   --prefix-index     Prefix playlist index to filename: 001 - Title.mp4
 #   --postfix-index    Postfix playlist index to filename: Title - 001.mp4
 #   --append-channel   Append channel name to title: Title - Channel.mp4
 #   --keep-id          Keep [VideoID] at end of filename
-#   -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes
-#   -o, --output DIR   Save files into DIR (default: current directory,
-#                      or channel name for channel URLs)
+#   -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes --cleanup --strip-emoji
+#   -o, --output DIR   Save files into DIR (default: channel name from URL,
+#                      or 'download/' if channel detection fails)
 #   -m, --max N        Stop after N videos per playlist (useful for testing)
 #   -l, --log DIR      Write log to DIR/yt-download-TIMESTAMP.log (default: current directory)
 #   --cleanup          Remove playlist folders with no media files after download
+#   --strip-emoji      After download, run yt-strip-emoji.sh to clean folder/file names
+#                      and .nfo titles of emoji that Jellyfin renders as tofu boxes
 #   -c, --cookies FILE Use a Netscape cookies.txt file for authentication
 #   -b, --browser BR   Use cookies from browser (chrome, firefox, safari, edge)
 #   -h, --help         Show usage
@@ -39,6 +42,7 @@
 #   ./yt-download.sh --sidecar --yes "https://www.youtube.com/playlist?list=PLxxx"
 #   ./yt-download.sh --sidecar --keep-id --append-channel --yes "https://..."
 #   ./yt-download.sh -a -y "https://www.youtube.com/playlist?list=PLxxx"
+#   ./yt-download.sh --jellyfin "https://www.zdf.de/reportagen/magic-pranks-100"
 #   ./yt-download.sh -u
 #
 # OUTPUT STRUCTURE
@@ -68,7 +72,7 @@
 #
 # =============================================================================
 
-# --- 0. Helpers ---
+# -- 0. Helpers --
 set -euo pipefail
 
 die()  { echo "Error: $*" >&2; exit 1; }
@@ -122,6 +126,14 @@ sanitise() {
         | sed 's/[. ]*$//'
 }
 
+# Check whether a directory contains any downloaded media files (top-level only).
+has_media_files() {  # has_media_files <dir>
+    find "$1" -maxdepth 1 \
+        \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \
+           -o -name "*.m4a" -o -name "*.mp3" -o -name "*.opus" \) \
+        -print -quit 2>/dev/null | grep -q .
+}
+
 # Download with curl (preferred) or wget fallback
 fetch() {   # fetch <url> <dest>
     if command -v curl &>/dev/null; then
@@ -145,6 +157,8 @@ fetch() {   # fetch <url> <dest>
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+IS_WINDOWS=false
+case "$OS" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;; esac
 
 case "$OS" in
     Linux*)
@@ -157,50 +171,48 @@ case "$OS" in
         die "Unsupported OS: $OS" ;;
 esac
 
-# Resolve yt-dlp binary: bundled copy first, then PATH, then download to ~/.local/bin
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FFMPEG_BIN=""
 
-if [[ -f "${SCRIPT_DIR}/${BINARY}" ]]; then
-    # Bundled -- ensure executable bit is set (zip does not preserve permissions)
-    chmod +x "${SCRIPT_DIR}/${BINARY}"
-    YTDLP_BIN="${SCRIPT_DIR}/${BINARY}"
-elif command -v yt-dlp &>/dev/null; then
-    YTDLP_BIN="$(command -v yt-dlp)"
+# Look for a bundled binary next to this script. If found, chmod +x (zip does
+# not preserve permissions) and echo the path. Otherwise echo nothing.
+resolve_bundled() {  # resolve_bundled <filename>
+    local path="${SCRIPT_DIR}/$1"
+    if [[ -f "$path" ]]; then
+        chmod +x "$path"
+        echo "$path"
+    fi
+}
+
+# Resolve yt-dlp binary: bundled copy first, then PATH, then download to ~/.local/bin
+YTDLP_BIN="$(resolve_bundled "$BINARY")"
+if [[ -z "$YTDLP_BIN" ]]; then
+    if command -v yt-dlp &>/dev/null; then
+        YTDLP_BIN="$(command -v yt-dlp)"
+    else
+        INSTALL_DIR="${HOME}/.local/bin"
+        mkdir -p "$INSTALL_DIR"
+        YTDLP_BIN="${INSTALL_DIR}/${BINARY}"
+    fi
+fi
+
+# Resolve bundled ffmpeg and deno (empty if not bundled).
+# *_LOCAL holds the filename for later Windows-path conversion.
+if [[ "$IS_WINDOWS" == true ]]; then
+    FFMPEG_LOCAL="ffmpeg.exe"
+    DENO_LOCAL="deno.exe"
 else
-    INSTALL_DIR="${HOME}/.local/bin"
-    mkdir -p "$INSTALL_DIR"
-    YTDLP_BIN="${INSTALL_DIR}/${BINARY}"
+    FFMPEG_LOCAL="ffmpeg"
+    DENO_LOCAL="deno"
 fi
-
-# Resolve ffmpeg: bundled copy first, then leave empty (yt-dlp will search PATH)
-case "$OS" in
-    MINGW*|MSYS*|CYGWIN*) FFMPEG_LOCAL="ffmpeg.exe" ;;
-    *)                     FFMPEG_LOCAL="ffmpeg" ;;
-esac
-
-if [[ -f "${SCRIPT_DIR}/${FFMPEG_LOCAL}" ]]; then
-    chmod +x "${SCRIPT_DIR}/${FFMPEG_LOCAL}"
-    FFMPEG_BIN="${SCRIPT_DIR}/${FFMPEG_LOCAL}"
-fi
-
-# Resolve bundled deno if present
-case "$OS" in
-    MINGW*|MSYS*|CYGWIN*) DENO_LOCAL="deno.exe" ;;
-    *)                     DENO_LOCAL="deno" ;;
-esac
-DENO_BIN=""
-if [[ -f "${SCRIPT_DIR}/${DENO_LOCAL}" ]]; then
-    chmod +x "${SCRIPT_DIR}/${DENO_LOCAL}"
-    DENO_BIN="${SCRIPT_DIR}/${DENO_LOCAL}"
-fi
+FFMPEG_BIN="$(resolve_bundled "$FFMPEG_LOCAL")"
+DENO_BIN="$(resolve_bundled "$DENO_LOCAL")"
 
 # On Cygwin/MSYS/MINGW, yt-dlp.exe is a native Windows binary so it needs
 # Windows-style paths (C:\...) for its own arguments (e.g. --ffmpeg-location).
 # However YTDLP_BIN itself must stay as a Unix path so bash can execute it.
 SCRIPT_DIR_WIN=""
 DENO_BIN_EXEC="$DENO_BIN"  # Cygwin/Unix path for executing deno directly in bash
-if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && command -v cygpath &>/dev/null; then
+if [[ "$IS_WINDOWS" == true ]] && command -v cygpath &>/dev/null; then
     SCRIPT_DIR_WIN="$(cygpath -w "$SCRIPT_DIR")"
     # FFMPEG_BIN and DENO_BIN are passed as arguments to yt-dlp.exe -- Windows paths needed
     [[ -n "$FFMPEG_BIN" ]] && FFMPEG_BIN="${SCRIPT_DIR_WIN}\\${FFMPEG_LOCAL}"
@@ -228,6 +240,7 @@ ENDPOINTS=()
 BASE_CHANNEL_URL=""
 LOG_DIR=""
 CLEANUP=false
+STRIP_EMOJI=false
 
 usage() {
     cat <<EOF
@@ -238,16 +251,17 @@ Options:
   -u, --update       Update yt-dlp to the latest release before running
   -a, --audio        Download audio only, as MP3
   -s, --sidecar      Save .info.json and thumbnail alongside each video
-  -p, --posters-only      Download folder poster images only (no video download)
+  -p, --posters-only Download folder poster images only (no video download)
   --prefix-index     Prefix playlist index: 001 - Title.mp4
   --postfix-index    Postfix playlist index: Title - 001.mp4
   --append-channel   Append channel name to title (if not already present)
   --keep-id          Keep [VideoID] at end of filename
-  -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes --cleanup
-  -o, --output DIR   Save files into DIR  (default: current directory)
+  -j, --jellyfin     Shortcut for --sidecar --append-channel --keep-id --yes --cleanup --strip-emoji
+  -o, --output DIR   Save files into DIR  (default: channel name, or 'download/' if detection fails)
   -m, --max N        Stop after N videos per playlist (useful for testing)
   -l, --log DIR      Write log to DIR/yt-download-TIMESTAMP.log (default: current dir)
   --cleanup          Remove playlist folders containing no media files after download
+  --strip-emoji      After download, run yt-strip-emoji.sh to clean folder/file names
   -c, --cookies FILE Use a cookies.txt file for authentication
   -b, --browser BROWSER  Use cookies from browser (chrome, firefox, safari, edge)
   -h, --help         Show this help
@@ -262,25 +276,26 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -y|--yes)    FORCE_YES=true;  shift ;;
-        -u|--update) DO_UPDATE=true;  shift ;;
-        -a|--audio)        AUDIO_ONLY=true;        shift ;;
-        -s|--sidecar)      SIDECAR=true;           shift ;;
-        -j|--jellyfin)     SIDECAR=true; APPEND_CHANNEL=true; KEEP_ID=true; FORCE_YES=true; CLEANUP=true; shift ;;
-        -p|--posters-only)      POSTERS_ONLY=true;      shift ;;
-        --prefix-index)    INDEX_MODE="prefix";    shift ;;
-        --postfix-index)   INDEX_MODE="postfix";   shift ;;
-        --append-channel)  APPEND_CHANNEL=true;    shift ;;
-        --keep-id)         KEEP_ID=true;           shift ;;
-        -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
-        -m|--max)    MAX_DOWNLOADS="$2"; shift 2 ;;
-        -l|--log)    LOG_DIR="$2";           shift 2 ;;
-        --cleanup)   CLEANUP=true;            shift ;;
-        -c|--cookies) COOKIES_FILE="$2"; shift 2 ;;
-        -b|--browser) COOKIES_FROM_BROWSER="$2"; shift 2 ;;
-        -h|--help)   usage 0 ;;
-        -*)          echo "Unknown option: $1" >&2; usage 1 ;;
-        *)           BASE_URL="$1"; shift ;;
+        -y|--yes)            FORCE_YES=true;                                                         shift ;;
+        -u|--update)         DO_UPDATE=true;                                                         shift ;;
+        -a|--audio)          AUDIO_ONLY=true;                                                        shift ;;
+        -s|--sidecar)        SIDECAR=true;                                                           shift ;;
+        -p|--posters-only)   POSTERS_ONLY=true;                                                      shift ;;
+        -j|--jellyfin)       SIDECAR=true; APPEND_CHANNEL=true; KEEP_ID=true; FORCE_YES=true; CLEANUP=true; STRIP_EMOJI=true; shift ;;
+        --prefix-index)      INDEX_MODE="prefix";                                                    shift ;;
+        --postfix-index)     INDEX_MODE="postfix";                                                   shift ;;
+        --append-channel)    APPEND_CHANNEL=true;                                                    shift ;;
+        --keep-id)           KEEP_ID=true;                                                           shift ;;
+        --cleanup)           CLEANUP=true;                                                           shift ;;
+        --strip-emoji)       STRIP_EMOJI=true;                                                       shift ;;
+        -o|--output)         OUTPUT_DIR="$2";                                                        shift 2 ;;
+        -m|--max)            MAX_DOWNLOADS="$2";                                                     shift 2 ;;
+        -l|--log)            LOG_DIR="$2";                                                           shift 2 ;;
+        -c|--cookies)        COOKIES_FILE="$2";                                                      shift 2 ;;
+        -b|--browser)        COOKIES_FROM_BROWSER="$2";                                              shift 2 ;;
+        -h|--help)           usage 0 ;;
+        -*)                  echo "Unknown option: $1" >&2; usage 1 ;;
+        *)                   BASE_URL="$1";                                                          shift ;;
     esac
 done
 
@@ -305,10 +320,14 @@ _POST_DOWNLOAD_DONE=false
 post_download() {
     [[ "$_POST_DOWNLOAD_DONE" == true ]] && return
     _POST_DOWNLOAD_DONE=true
-    [[ "${SIDECAR:-false}" != true ]] && return
     [[ -z "${OUT_PREFIX:-}" ]] && return
-    write_nfo_files "$OUT_PREFIX" 2>/dev/null || true
-    fetch_posters "$OUT_PREFIX" 2>/dev/null || true
+    if [[ "${SIDECAR:-false}" == true ]]; then
+        write_nfo_files "$OUT_PREFIX" "${SHOW_TITLE:-}" 2>/dev/null || true
+        fetch_posters "$OUT_PREFIX" 2>/dev/null || true
+    fi
+    if [[ "${STRIP_EMOJI:-false}" == true ]]; then
+        strip_emoji 2>/dev/null || true
+    fi
 }
 trap post_download EXIT
 
@@ -435,14 +454,30 @@ fetch_posters() {
 }
 
 
+# Escape special XML characters for safe embedding in NFO file elements.
+xml_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</'&lt;'}"
+    s="${s//>/'&gt;'}"
+    s="${s//'"'/'&quot;'}"
+    echo "$s"
+}
+
 # Build the output filename template from the naming flags.
 # yt-dlp supports %(channel)s, %(title)s, %(id)s, %(playlist_index)s etc.
 # We compose a title portion and wrap it with optional index and [id].
 # Write tvshow.nfo and season.nfo files for Jellyfin.
 # Called once after all downloads complete when --sidecar is set.
-write_nfo_files() {
+#
+# If show_title is empty, falls back to the basename of the output directory.
+# Use this override when the human-readable channel display name differs from
+# the folder name (e.g. user passed -o, or channel name detection succeeded).
+
+write_nfo_files() {  # write_nfo_files <out_prefix> [<show_title>]
     info "Writing .nfo files..."
     local out_prefix="$1"
+    local show_title_arg="${2:-}"
     local root_dir="${out_prefix%/}"
     [[ -z "$root_dir" ]] && root_dir="."
 
@@ -450,9 +485,13 @@ write_nfo_files() {
     local tvshow_nfo="${root_dir}/tvshow.nfo"
     if [[ ! -f "$tvshow_nfo" ]]; then
         local show_title
-        show_title="$(basename "$root_dir")"
+        if [[ -n "$show_title_arg" ]]; then
+            show_title="$show_title_arg"
+        else
+            show_title="$(basename "$root_dir")"
+        fi
         printf '<?xml version="1.0" encoding="utf-8"?>\n<tvshow>\n  <title>%s</title>\n</tvshow>\n' \
-            "$show_title" > "$tvshow_nfo"
+            "$(xml_escape "$show_title")" > "$tvshow_nfo"
         echo "Written: $tvshow_nfo"
     fi
 
@@ -460,19 +499,37 @@ write_nfo_files() {
     # season.nfo in each playlist subfolder that contains media
     local season_num=0
     while IFS= read -r -d "" playlist_dir; do
-        if ! find "$playlist_dir" -maxdepth 1 \
-                \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \
-                   -o -name "*.m4a" -o -name "*.mp3" \) \
-                -print -quit 2>/dev/null | grep -q .; then
+        if ! has_media_files "$playlist_dir"; then
             continue
         fi
         (( season_num++ )) || true
         local playlist_title
         playlist_title="$(basename "$playlist_dir")"
         printf '<?xml version="1.0" encoding="utf-8"?>\n<season>\n  <title>%s</title>\n  <seasonnumber>%d</seasonnumber>\n</season>\n' \
-            "$playlist_title" "$season_num" > "${playlist_dir}/season.nfo"
+            "$(xml_escape "$playlist_title")" "$season_num" > "${playlist_dir}/season.nfo"
         echo "Written: ${playlist_dir}/season.nfo (Season ${season_num}: ${playlist_title})"
     done < <(find "$root_dir" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+}
+
+# Run yt-strip-emoji.sh on the output prefix to clean folder/file names
+# and .nfo titles. Called from post_download() when --strip-emoji is set.
+# Quietly skipped if the script isn't alongside this one.
+strip_emoji() {
+    local strip_script="${SCRIPT_DIR}/yt-strip-emoji.sh"
+    if [[ ! -x "$strip_script" ]]; then
+        info "--strip-emoji set but ${strip_script} not found or not executable -- skipping"
+        return
+    fi
+    # Refuse to run on the current working directory -- that would walk every
+    # sibling folder the user happens to have here. Only run when we have an
+    # explicit output dir (from -o DIR or a detected channel folder).
+    if [[ -z "${OUT_PREFIX:-}" ]]; then
+        info "--strip-emoji skipped: no explicit output directory (use -o DIR or a /@channel/ URL)"
+        return
+    fi
+    local strip_target="${OUT_PREFIX%/}"
+    info "Running yt-strip-emoji.sh on ${strip_target}..."
+    "$strip_script" "$strip_target" || info "yt-strip-emoji.sh exited non-zero -- check output above"
 }
 
 build_template() {  # build_template <in_playlist: true|false>
@@ -480,12 +537,14 @@ build_template() {  # build_template <in_playlist: true|false>
     local title_part="%(title)s"
 
     # Append channel name if requested.
+    # %(channel,series)s: use channel for YouTube, fall back to series for ZDF
+    # (ZDF videos have no channel but always have a series name).
     # Note: yt-dlp templates cannot check if the channel name is already
     # in the video title, so duplication is possible for videos that include
     # the channel name in their title. Use dejellyfin --append-channel instead
     # if you want deduplication after the fact.
     if [[ "$APPEND_CHANNEL" == true ]]; then
-        title_part="${title_part} - %(channel)s"
+        title_part="${title_part} - %(channel,series)s"
     fi
 
     # Wrap with index
@@ -499,43 +558,56 @@ build_template() {  # build_template <in_playlist: true|false>
     # Append [VideoID] if requested
     [[ "$KEEP_ID" == true ]] && stem="${stem} [%(id)s]"
 
-    # Prepend playlist folder for playlist downloads
+    # Prepend playlist folder for playlist downloads.
+    # %(playlist_title,series)s: use playlist_title for YouTube, fall back to
+    # series for ZDF (individual ZDF video URLs have no playlist_title, but
+    # series is always set).
     if [[ "$in_playlist" == true ]]; then
-        echo "%(playlist_title)s/${stem}.%(ext)s"
+        echo "%(playlist_title,series)s/${stem}.%(ext)s"
     else
         echo "${stem}.%(ext)s"
     fi
 }
 
+# Decide whether to treat a URL as a playlist or single video. Echoes
+# "playlist" or "video". May prompt the user for ambiguous video+playlist URLs.
+classify_url() {  # classify_url <url>
+    local url="$1"
+    if [[ "$url" == *"watch?v="* && "$url" == *"list="* ]]; then
+        local confirm=""
+        if [[ "$FORCE_YES" == true ]]; then
+            confirm="y"
+        else
+            read_tty confirm "Detected video+playlist URL. Download WHOLE playlist? (y/n): "
+        fi
+        [[ "$confirm" =~ ^[yY]$ ]] && echo playlist || echo video
+    elif [[ "$url" == *"list="* || "$url" == *"/videos" || "$url" == *"/shorts" ]]; then
+        echo playlist
+    # ZDF collection/series/genre pages contain multiple episodes -- treat as playlist.
+    # Individual ZDF videos end in -NNN.html or /NNN (e.g. -100.html, /ewig-dein-102).
+    # Collection pages do not match that pattern (e.g. /reportagen/magic-pranks-100 is
+    # actually a collection despite ending in -100; yt-dlp's ZDF extractor handles it).
+    elif [[ "$url" == *"zdf.de/"* ]]; then
+        echo playlist
+    else
+        echo video
+    fi
+}
+
 # Run the full download+sidecar process for a given URL list and prefix
-run_download() {  # run_download <url_list_varname> <out_prefix>
+# Run the full download+sidecar process for a list of URLs and a prefix.
+# Bash 3.2 compatible -- no namerefs. URLs passed as positional args after prefix.
+run_download() {  # run_download <out_prefix> <url1> [<url2> ...]
     info "Starting download ..."
-    local -n _urls="$1"
-    local _prefix="$2"
-    info "run_download called: ${#_urls[@]} urls, prefix='$_prefix'"  # ADD THIS
-    for url in "${_urls[@]}"; do
-        info "Processing url: $url"  # ADD THIS
+    local _prefix="$1"
+    shift
+    for url in "$@"; do
         OUT_PREFIX="$_prefix"
         OPTS=("${BASE_OPTS[@]}")
-        local confirm=""
-        if [[ "$url" == *"watch?v="* && "$url" == *"list="* ]]; then
-            if [[ "$FORCE_YES" == true ]]; then confirm="y"
-            else read_tty confirm "Detected video+playlist URL. Download WHOLE playlist? (y/n): "
-            fi
-            if [[ "$confirm" =~ ^[yY]$ ]]; then
-                OPTS+=("--yes-playlist")
-                OUT_TEMPLATE="${_prefix}$(build_template true)"
-            else
-                OPTS+=("--no-playlist")
-                OUT_TEMPLATE="${_prefix}$(build_template false)"
-            fi
-        elif [[ "$url" == *"list="* || "$url" == *"/videos" || "$url" == *"/shorts" ]]; then
-            OPTS+=("--yes-playlist")
-            OUT_TEMPLATE="${_prefix}$(build_template true)"
-        else
-            OPTS+=("--no-playlist")
-            OUT_TEMPLATE="${_prefix}$(build_template false)"
-        fi
+        case "$(classify_url "$url")" in
+            playlist) OPTS+=("--yes-playlist"); OUT_TEMPLATE="${_prefix}$(build_template true)"  ;;
+            video)    OPTS+=("--no-playlist");  OUT_TEMPLATE="${_prefix}$(build_template false)" ;;
+        esac
         check_dir="${_prefix:-.}"
         check_dir="${check_dir%/}"
         [[ -z "$check_dir" ]] && check_dir="."
@@ -607,17 +679,30 @@ fi
 
 
 # -- 7. Resolve output directory --
+#
+# Priority for naming the output folder:
+#   1. -o DIR (explicit user choice -- always wins)
+#   2. Channel display name from yt-dlp (e.g. "BBC Earth Kids")
+#   3. Channel handle from URL (e.g. "BBCEarthKids" from /@BBCEarthKids/...)
+#   4. Fallback to "download/" with a warning -- we never want OUT_PREFIX empty,
+#      because --cleanup and --strip-emoji refuse to run on the current directory.
+#
+# Note: step 2 always runs (even for /@Handle/ URLs) because the display name
+# tends to be more readable and matches what users see in Jellyfin.
+
+CHANNEL_NAME=""
+URL_HANDLE=""  # fallback for /@Handle/ URLs if yt-dlp can't return a display name
+SHOW_TITLE=""  # what to write to tvshow.nfo; defaults to folder basename if empty
 
 if [[ -n "$OUTPUT_DIR" ]]; then
     mkdir -p "$OUTPUT_DIR" || die "Cannot create output directory: $OUTPUT_DIR"
     OUT_PREFIX="${OUTPUT_DIR}/"
-elif [[ "$BASE_URL" == *"/@"* || "$BASE_URL" == */channel/* || "$BASE_URL" == */user/* ]]; then
-    # Looks like a channel page -- try to extract the channel name
-    CHANNEL_NAME=""
-
+    # User chose the folder name explicitly -- respect it for the nfo title too
+else
+    # If this is a /@Handle/ URL, capture the handle as a fallback first
     if [[ "$BASE_URL" == *"/@"* ]]; then
-        # /@ChannelName/... -- name is right there in the URL, no extra yt-dlp call needed
-        CHANNEL_NAME="$(echo "$BASE_URL" | sed 's|.*/@||; s|/.*||')"
+        URL_HANDLE="$(echo "$BASE_URL" | sed 's|.*/@||; s|/.*||')"
+
         # If URL has no path after the channel handle, prompt for what to download
         if [[ "$BASE_URL" =~ ^https://www\.youtube\.com/@[^/]+/?$ ]]; then
             CHANNEL_HANDLE="${BASE_URL%/}"
@@ -638,23 +723,43 @@ elif [[ "$BASE_URL" == *"/@"* || "$BASE_URL" == */channel/* || "$BASE_URL" == */
             BASE_URL="${BASE_CHANNEL_URL}/${ENDPOINTS[0]}"
             info "Will download: ${ENDPOINTS[*]}"
         fi
-    else
-        # /channel/UCxxx or /user/Name -- ask yt-dlp for the uploader name
-        info "Detecting channel name..."
-        CHANNEL_NAME="$("$YTDLP_BIN" --flat-playlist --playlist-items 1 --print uploader "$BASE_URL" 2>/dev/null | head -1)"
     fi
 
-    if [[ -n "$CHANNEL_NAME" && "$CHANNEL_NAME" != "NA" ]]; then
+    # For ZDF URLs derive the root folder directly from the URL category segment --
+    # e.g. https://www.zdf.de/reportagen/magic-pranks-100 -> "ZDF Reportagen".
+    # This must run before the yt-dlp metadata lookup because playlist_title returns
+    # the show name ("Magic Pranks"), which is correct for the subfolder but not the
+    # root. The show name reaches the subfolder via %(series)s in the output template.
+    if [[ "$BASE_URL" == *"zdf.de/"* ]]; then
+        _zdf_path="${BASE_URL#*zdf.de/}"  # strip scheme+host
+        _zdf_path="${_zdf_path%%\?*}"     # strip query string
+        _zdf_path="${_zdf_path%/}"        # strip trailing slash
+        _zdf_category="${_zdf_path%%/*}"  # first path segment = category
+        _zdf_category_title="$(echo "$_zdf_category" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')"
+        CHANNEL_NAME="ZDF ${_zdf_category_title}"
+        SHOW_TITLE="$CHANNEL_NAME"
         CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
-        info "Using channel name as output directory: $CHANNEL_NAME"
-        mkdir -p "$CHANNEL_NAME" || die "Cannot create output directory: $CHANNEL_NAME"
-        OUT_PREFIX="${CHANNEL_NAME}/"
+        info "Output directory from ZDF URL category: $CHANNEL_NAME"
     else
-        info "Could not detect channel name -- saving to current directory"
-        OUT_PREFIX=""
+        # For YouTube and others, ask yt-dlp for the channel/uploader display name.
+        info "Detecting channel name from URL metadata..."
+        CHANNEL_NAME="$("$YTDLP_BIN" --flat-playlist --playlist-items 1 --print uploader "$BASE_URL" 2>/dev/null | head -1)"
+
+        if [[ -n "$CHANNEL_NAME" && "$CHANNEL_NAME" != "NA" ]]; then
+            SHOW_TITLE="$CHANNEL_NAME"
+            CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
+            info "Using channel display name as output directory: $CHANNEL_NAME"
+        elif [[ -n "$URL_HANDLE" ]]; then
+            CHANNEL_NAME="$(sanitise "$URL_HANDLE")"
+            info "Could not detect channel display name -- using URL handle: $CHANNEL_NAME"
+        else
+            CHANNEL_NAME="download"
+            info "WARNING: Could not detect channel name -- using fallback 'download/'"
+            info "         (use -o DIR to pick a specific output directory)"
+        fi
     fi
-else
-    OUT_PREFIX=""
+    mkdir -p "$CHANNEL_NAME" || die "Cannot create output directory: $CHANNEL_NAME"
+    OUT_PREFIX="${CHANNEL_NAME}/"
 fi
 
 
@@ -675,6 +780,15 @@ if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
     # Direct playlist, video, /videos or /shorts URL -- use as-is, no expansion needed
     urls=("$BASE_URL")
 else
+    # Channel or collection page -- expand into individual URLs.
+    # For YouTube channel pages we reconstruct full playlist URLs from IDs.
+    # For all other sites (e.g. ZDF) we use %(url)s -- yt-dlp already knows the URL.
+    if [[ "$BASE_URL" == *"youtube.com"* || "$BASE_URL" == *"youtu.be"* ]]; then
+        _url_print_template="https://www.youtube.com/playlist?list=%(id)s"
+    else
+        _url_print_template="%(url)s"
+    fi
+
     # Channel or other page -- expand into list of playlist URLs
     stderr_tmp="$(mktemp)"
     while IFS= read -r line; do
@@ -682,7 +796,7 @@ else
     done < <(
         "$YTDLP_BIN" \
             --flat-playlist \
-            --print "https://www.youtube.com/playlist?list=%(id)s" \
+            --print "$_url_print_template" \
             "$BASE_URL" 2>"$stderr_tmp"
     )
 
@@ -745,14 +859,19 @@ else
         "--convert-subs" "srt"
         "--embed-subs"
         "--windows-filenames"
-        "-f" "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        # Format selector tries in order:
+        # 1. YouTube: best mp4 video + m4a audio merged by ffmpeg (split streams)
+        # 2. ZDF / other muxed sources: best mp4 HLS at 1080p (~950MB/24min)
+        #    To save space, swap height<=1080 for height<=720 (~450MB/24min, 720p)
+        # 3. Any mp4, then anything as last resort
+        "-f" "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best[ext=mp4]/best"
     )
 fi
 
 # Pass bundled ffmpeg location to yt-dlp if we found one.
 # FFMPEG_BIN is already a Windows path on Cygwin/MSYS/MINGW (converted above).
 if [[ -n "$FFMPEG_BIN" ]]; then
-    if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]] && [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
+    if [[ "$IS_WINDOWS" == true ]] && [[ -n "${SCRIPT_DIR_WIN:-}" ]]; then
         # Use the already-converted Windows path directly
         BASE_OPTS+=("--ffmpeg-location" "$SCRIPT_DIR_WIN")
     else
@@ -763,7 +882,7 @@ fi
 # On Windows, test whether long path support is active by actually trying to
 # create a file with a path longer than 260 characters. This is more reliable
 # than reading the registry, which may not reflect reality until after a reboot.
-if [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* ]]; then
+if [[ "$IS_WINDOWS" == true ]]; then
     LONG_PATH_OK=false
     test_dir="$(mktemp -d 2>/dev/null || echo "")"
     if [[ -n "$test_dir" ]]; then
@@ -800,7 +919,10 @@ if [[ -n "$DENO_BIN_EXEC" ]]; then
     info "Using bundled deno for yt-dlp JS support"
     BASE_OPTS+=("--js-runtimes" "deno:${DENO_BIN}")
 elif command -v deno &>/dev/null || command -v node &>/dev/null || command -v phantomjs &>/dev/null; then
-    JS_RT="$(command -v deno &>/dev/null && echo deno || command -v node &>/dev/null && echo node || echo phantomjs)"
+    if   command -v deno      &>/dev/null; then JS_RT=deno
+    elif command -v node      &>/dev/null; then JS_RT=node
+    else                                        JS_RT=phantomjs
+    fi
     info "JS runtime found ($JS_RT) -- using default yt-dlp clients"
 else
     info "No JS runtime found -- using mweb,ios clients (install deno for best quality)"
@@ -835,49 +957,56 @@ BASE_OPTS+=("--no-overwrites")
 
 # -- 12. Run main download --
 
-run_download urls "$OUT_PREFIX"
+run_download "$OUT_PREFIX" "${urls[@]}"
 
 # If a bare channel URL was given, process remaining endpoints
 if [[ -n "${ENDPOINTS[*]+x}" && ${#ENDPOINTS[@]} -gt 1 ]]; then
     for endpoint in "${ENDPOINTS[@]:1}"; do
         ep_url="${BASE_CHANNEL_URL}/${endpoint}"
         info "Fetching content from $ep_url"
-        ep_urls=("$ep_url")
-        run_download ep_urls "$OUT_PREFIX"
+        run_download "$OUT_PREFIX" "$ep_url"
     done
 fi
 
 
 # -- 13. Cleanup: remove playlist folders with no media files and under size threshold --
 
-if [[ "$CLEANUP" == true ]]; then
+# IMPORTANT: cleanup only runs when we have an explicit output directory.
+# Running cleanup against the current working directory is dangerous -- it would
+# scan any sibling channel folders the user happens to have in cwd, and could
+# delete them if they're under the size threshold. This guard prevents that
+# for bare playlist URLs (no -o, no /@channel/), where OUT_PREFIX is empty.
+if [[ "$CLEANUP" == true && -n "$OUT_PREFIX" ]]; then
     info "Running cleanup -- removing folders with no media files (must be < 2MB)..."
-    cleanup_dir="${OUT_PREFIX:-.}"
-    cleanup_dir="${cleanup_dir%/}"
+    cleanup_dir="${OUT_PREFIX%/}"
     [[ -z "$cleanup_dir" ]] && cleanup_dir="."
     CLEANUP_SIZE_LIMIT=2097152  # 2MB in bytes -- safety net against accidental deletion
     removed=0
     while IFS= read -r -d "" dir; do
         [[ ! -d "$dir" ]] && continue
-        # Safety check: skip if folder exceeds size limit
-        dir_size="$(du -sb "$dir" 2>/dev/null | awk "{print \$1}" || echo 0)"
+        # Safety check: skip if folder exceeds size limit OR if size couldn't be determined.
+        # An empty/failed du output means we don't know the size, so we MUST NOT delete.
+        dir_size="$(du -sb "$dir" 2>/dev/null | awk '{print $1}')"
+        if [[ -z "$dir_size" || ! "$dir_size" =~ ^[0-9]+$ ]]; then
+            info "Skipping (could not determine size): $dir"
+            continue
+        fi
         if [[ "$dir_size" -ge "$CLEANUP_SIZE_LIMIT" ]]; then
             continue
         fi
         # Check for any media files
-        if ! find "$dir" -maxdepth 1 \
-                \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \
-                   -o -name "*.m4a" -o -name "*.mp3" -o -name "*.opus" \) \
-                -print -quit 2>/dev/null | grep -q .; then
+        if ! has_media_files "$dir"; then
             info "Removing folder (no media, $(numfmt --to=iec "$dir_size" 2>/dev/null || echo "${dir_size}B")): $dir"
             rm -rf "$dir"
             (( removed++ )) || true
         fi
     done < <(find "$cleanup_dir" -mindepth 1 -maxdepth 2 -type d -print0 | sort -rz)
     info "Cleanup done. Removed $removed folder(s)."
+elif [[ "$CLEANUP" == true ]]; then
+    info "Cleanup skipped: no explicit output directory (use -o DIR or a /@channel/ URL to enable cleanup)"
 fi
 
-# -- 14. Run post-download tasks (nfo files + posters) --
+# -- 14. Run post-download tasks (nfo files + posters + strip emoji) --
 
 # Also called by the exit trap on error, so always runs.
 post_download

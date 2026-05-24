@@ -1,16 +1,18 @@
 # yt-download suite
 
-A set of bash scripts to download and organise YouTube videos, playlists, and channels — with sane filenames across all platforms.
+A set of bash scripts to download and organise YouTube and ZDF Mediathek videos, playlists, and channels — with sane filenames across all platforms.
 
 ## Scripts
 
-- **`yt-download.sh`** — downloads video, videos, shorts, playlists, or whole channel - including artwork
+- **`yt-download.sh`** — downloads videos, shorts, playlists, or whole channels from YouTube and ZDF Mediathek — including artwork
 - **`yt-rename.sh`** — renames downloaded files using `.info.json` sidecar metadata
 - **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering
+- **`yt-strip-emoji.sh`** — strips emoji from folder/file names and `.nfo` titles so Jellyfin displays them correctly
+- **`yt-common.sh`** — shared helper library sourced by the other scripts (not run directly)
 
 ## Features
 
-- Downloads single videos, playlists, or whole channels
+- Downloads single videos, playlists, or whole channels from YouTube and ZDF Mediathek
 - Downloads are compatible with [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin) and [jf-ytdlp-info-reader-plugin](https://github.com/ArabCoders/jf-ytdlp-info-reader-plugin/)
 - Automatically downloads and manages [yt-dlp](https://github.com/yt-dlp/yt-dlp) — no manual setup needed
 - Embeds English subtitles as `.srt` into the video file
@@ -21,6 +23,7 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 - Downloads channel playlists, videos, and shorts -- separately or all at once
 - Saves `.info.json` and thumbnail sidecars for Jellyfin and similar media servers
 - Generates Jellyfin `season.nfo` files to fix incorrect season numbering
+- Strips emoji from folder/file names and `.nfo` titles for Jellyfin compatibility
 - Saves `poster.jpg` in channel and playlist folders for series/season artwork
 - Skips private or unavailable videos and continues the playlist
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
@@ -39,6 +42,7 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
   - macOS: `curl` is always present
   - Linux / WSL: one or both are usually present; if not: `sudo apt install curl`
   - Windows/Git Bash: `curl` ships with Windows 10 1803+ and is available in Git Bash
+- **perl** for `yt-strip-emoji.sh` (ships by default on macOS, Linux, and Git Bash)
 
 ## Bundles vs Standalone
 
@@ -46,11 +50,11 @@ A set of bash scripts to download and organise YouTube videos, playlists, and ch
 
 | Bundle | Includes |
 |--------|----------|
-| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno (Apple Silicon) |
-| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
-| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno (Apple Silicon) |
+| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
+| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-common.sh, yt-dlp, ffmpeg, deno |
 
 Extract the archive for your platform and run the scripts from the extracted folder. No other setup required.
 
@@ -75,7 +79,7 @@ Extract the archive for your platform and run the scripts from the extracted fol
 | `-y`, `--yes`             | Download without prompting; downloads all (playlists, videos, shorts) when a bare channel URL is given |
 | `-u`, `--update`          | Update yt-dlp and deno before running (URL optional)                                                   |
 | `-a`, `--audio`           | Download audio only as MP3 (no video, no subtitles)                                                    |
-| `-j`, `--jellyfin`        | Shortcut for `--sidecar --append-channel --keep-id --yes --cleanup`                                    |
+| `-j`, `--jellyfin`        | Shortcut for `--sidecar --append-channel --keep-id --yes --cleanup --strip-emoji`                      |
 | `-s`, `--sidecar`         | Save `.info.json` and thumbnail alongside each video                                                   |
 | `-p`, `--posters-only`    | Download folder poster images only, no videos                                                          |
 | `-m`, `--max N`           | Stop after N videos per playlist (useful for testing)                                                  |
@@ -83,9 +87,10 @@ Extract the archive for your platform and run the scripts from the extracted fol
 | `--postfix-index`         | Postfix playlist index to filename: `Title - 001.mp4`                                                  |
 | `--append-channel`        | Append channel name to title (if not already present)                                                  |
 | `--keep-id`               | Keep `[VideoID]` at end of filename                                                                    |
-| `-o`, `--output DIR`      | Save files into `DIR` (default: current directory, or channel name for channel URLs)                   |
+| `-o`, `--output DIR`      | Save files into `DIR`. If omitted, the script uses the channel name (extracted from the URL or via yt-dlp metadata). If channel detection fails, falls back to `download/`. |
 | `-l`, `--log DIR`         | Write log to `DIR/yt-download-TIMESTAMP.log` (default: current directory)                              |
 | `--cleanup`               | Remove empty playlist folders after download (no media files AND under 2MB)                            |
+| `--strip-emoji`           | After download, strip emoji from folder/file names and `.nfo` titles (runs `yt-strip-emoji.sh`)        |
 | `-c`, `--cookies FILE`    | Use a Netscape `cookies.txt` file for authentication                                                   |
 | `-b`, `--browser BROWSER` | Use cookies from browser: `chrome`, `firefox`, `safari`, `edge`                                        |
 | `-h`, `--help`            | Show usage                                                                                             |
@@ -131,7 +136,7 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ```bash
 ./yt-download.sh --jellyfin "https://www.youtube.com/@BedtimeHistory"
 # Equivalent to:
-./yt-download.sh --sidecar --append-channel --keep-id --yes "https://www.youtube.com/@BedtimeHistory"
+./yt-download.sh --sidecar --append-channel --keep-id --yes --cleanup --strip-emoji "https://www.youtube.com/@BedtimeHistory"
 # With --yes / --jellyfin on a bare channel URL, all playlists, videos, and shorts are downloaded.
 ```
 
@@ -144,6 +149,13 @@ Extract the archive for your platform and run the scripts from the extracted fol
 ```bash
 ./yt-download.sh --audio "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
+
+**Download from ZDF Mediathek:**
+```bash
+./yt-download.sh --jellyfin "https://www.zdf.de/reportagen/magic-pranks-100"
+./yt-download.sh --jellyfin "https://www.zdf.de/serien/the-rookie"
+```
+ZDF URLs are detected automatically. The output folder is named from the URL category (`ZDF Reportagen`, `ZDF Serien`, etc.) with the show as a subfolder.
 
 **Test with just 3 videos per playlist:**
 ```bash
@@ -191,12 +203,13 @@ A folder with any media file, or anything over 2MB, is left untouched regardless
 | Channel `/videos` | `ChannelName/ChannelName - Videos/Video Title.mp4` |
 | Channel `/shorts` | `ChannelName/ChannelName - Shorts/Video Title.mp4` |
 | With `-a` | `Video Title.mp3` |
+| ZDF collection | `ZDF Reportagen/Magic Pranks/Episode Title - Magic Pranks [id].mp4` |
 
 ### Jellyfin Workflow
 
 The `--jellyfin` flag is the recommended way to download channels for use with [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin) 
 and [jf-ytdlp-info-reader-plugin](https://github.com/ArabCoders/jf-ytdlp-info-reader-plugin/).
-It combines several flags into one: --sidecar, --append-channel, --keep-id, and --yes:
+It combines several flags into one: `--sidecar`, `--append-channel`, `--keep-id`, `--yes`, `--cleanup`, and `--strip-emoji`:
 
 ```bash
 ./yt-download.sh --jellyfin "https://www.youtube.com/@BedtimeHistory"
@@ -209,9 +222,11 @@ This single command:
 - Keeps `[VideoID]` in each filename for reliable Jellyfin matching
 - Saves `poster.jpg` in each playlist folder and the channel root
 - Writes `tvshow.nfo` and `season.nfo` files for correct Jellyfin season numbering
+- Removes any empty playlist folders left over (no media, under 2MB)
+- After the download, runs `yt-strip-emoji.sh` to clean emoji from folder/file names and `.nfo` titles so they render correctly in Jellyfin
 - Skips private or unavailable videos and continues
 
-If you get authentication error, you might need to sign into YouTube in your browser and provider the --browser parameter:
+If you get an authentication error, you might need to sign into YouTube in your browser and provide the `--browser` parameter:
 
 ```bash
 ./yt-download.sh --browser firefox --jellyfin "https://www.youtube.com/@BedtimeHistory"
@@ -223,6 +238,7 @@ See **Authentication (Sign-in / Bot Detection)** below for details.
 ```bash
 ./yt-rename.sh --jellyfin --all ~/Videos
 ./yt-nfo.sh --all ~/Videos
+./yt-strip-emoji.sh --all ~/Videos
 ./yt-download.sh --posters-only --yes "https://www.youtube.com/@BedtimeHistory"
 ```
 
@@ -336,6 +352,70 @@ ChessKidOfficial/
     poster.jpg              <- playlist artwork
     video [VideoID].mp4
 ```
+
+---
+
+## yt-strip-emoji.sh
+
+Strips emoji and pictograph characters from folder names, file names, and `.nfo` titles. Jellyfin renders many of these characters as tofu boxes (☐) in its web UI even though the underlying files are valid UTF-8, particularly when CJK or emoji fonts are missing on the server. Kids' channels in particular tend to use emoji liberally in playlist titles.
+
+> **Note:** When using `--jellyfin`, this script is run automatically as a post-download step. `yt-strip-emoji.sh` is for fixing existing downloads or running on libraries that pre-date the `--strip-emoji` flag.
+
+### What gets stripped
+
+- Emoji and pictographs (U+1F000–U+1FFFF): 🦁 🎵 🎂 🐘 etc.
+- Miscellaneous symbols and dingbats (U+2600–U+27BF): ❤ ☀ ♪ ♫
+- Misc. symbols and arrows (U+2B00–U+2BFF): ⭐ ⬆ ⬇
+- Variation selectors (U+FE00–U+FE0F) and zero-width joiner (U+200D)
+
+CJK characters (Chinese, Japanese, Korean), accented Latin characters (é, ü, ñ), and all other letters render correctly in Jellyfin and are **not** touched.
+
+### Usage
+
+```
+./yt-strip-emoji.sh [options] <directory>
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-n`, `--dry-run` | Show what would change without doing anything |
+| `-a`, `--all` | Process every subfolder in `DIR` as a separate channel |
+| `-l`, `--log DIR` | Write log to `DIR/yt-strip-emoji-TIMESTAMP.log` (default: current directory) |
+| `-h`, `--help` | Show usage |
+
+### Examples
+
+```bash
+# Preview what would change
+./yt-strip-emoji.sh --dry-run ~/Videos/KidsMusic
+
+# Clean a single channel
+./yt-strip-emoji.sh ~/Videos/KidsMusic
+
+# Clean every channel in a folder
+./yt-strip-emoji.sh --all ~/Videos
+```
+
+### Merge behaviour
+
+If a folder strips to a name that already exists (typical when re-downloading a channel that was previously stripped), the script **merges** the two folders rather than refusing:
+
+- Files unique to the emoji folder are moved into the existing folder
+- Files that exist in both folders with **identical contents** are deleted from the emoji folder (deduplication)
+- Files that exist in both folders with **different contents** are left in place and reported as a warning — manual review needed
+- The source folder is removed only if it ends up empty
+
+This makes it safe to run after every download. The most common case — re-downloading a channel that had `--strip-emoji` applied previously — produces clean output with no manual intervention.
+
+### What it touches
+
+- Folder names containing emoji are renamed (or merged into the existing clean folder)
+- Files inside those folders (`.mp4`, `.mkv`, `.webm`, `.m4a`, `.mp3`, `.opus`, `.jpg`, `.png`, `.webp`, `.srt`, `.vtt`, `.info.json`) are renamed
+- `.nfo` files have their first `<title>...</title>` rewritten — `tvshow.nfo` and `season.nfo` stay in sync with their folder names
+
+After running, do a **Refresh Metadata** in Jellyfin to pick up the changes.
 
 ---
 
