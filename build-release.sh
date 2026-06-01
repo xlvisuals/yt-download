@@ -101,10 +101,12 @@ FFMPEG_LINUX_ARCHIVE="ffmpeg-master-latest-linux64-gpl.tar.xz"
 FFMPEG_LINUX_AARCH64_ARCHIVE="ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
 FFMPEG_WIN_ARCHIVE="ffmpeg-master-latest-win64-gpl.zip"
 
-# evermeet.cx: /getrelease redirects to the latest release zip (x64 only)
-FFMPEG_MACOS_X64_URL="https://evermeet.cx/ffmpeg/getrelease/zip"
-FFPLAY_MACOS_X64_URL="https://evermeet.cx/ffmpeg/getrelease/ffplay/zip"
-FFPROBE_MACOS_X64_URL="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
+# macOS x64:     osxexperts.net (static builds with VideoToolbox enabled)
+# macOS aarch64: ffmpeg.martin-riedl.de (signed + notarized Apple Silicon builds, but no VideoToolbox)
+#                Note: ARM users who need VideoToolbox should install ffmpeg via Homebrew.
+FFMPEG_MACOS_X64_URL="https://www.osxexperts.net/ffmpeg80intel.zip"
+FFPLAY_MACOS_X64_URL="https://www.osxexperts.net/ffplay80intel.zip"
+FFPROBE_MACOS_X64_URL="https://www.osxexperts.net/ffprobe80intel.zip"
 # martin-riedl.de: static ARM64 build, signed and notarized
 FFMPEG_MACOS_AARCH64_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip"
 FFPLAY_MACOS_AARCH64_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffplay.zip"

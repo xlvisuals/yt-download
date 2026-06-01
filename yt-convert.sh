@@ -240,14 +240,14 @@ detect_encoder() {  # detect_encoder <codec: hevc|h264> -> echo encoder_name
                 ENCODER_FLAGS=("-tag:v" "hvc1")
                 echo "hevc_videotoolbox"
             else
-                info "hevc_videotoolbox not in this ffmpeg build -- using libx265"
+                info "hevc_videotoolbox not in this ffmpeg build -- using libx265" >&2
                 echo "libx265"
             fi
         else
             if encoder_available "h264_videotoolbox"; then
                 echo "h264_videotoolbox"
             else
-                info "h264_videotoolbox not in this ffmpeg build -- using libx264"
+                info "h264_videotoolbox not in this ffmpeg build -- using libx264" >&2
                 echo "libx264"
             fi
         fi
@@ -267,7 +267,7 @@ detect_encoder() {  # detect_encoder <codec: hevc|h264> -> echo encoder_name
         HW_ACCEL_FLAGS=("-hwaccel" "cuda" "-hwaccel_output_format" "cuda")
         echo "$nvenc_name"
     else
-        info "NVENC not available -- using software encoder"
+        info "NVENC not available -- using software encoder" >&2
         if [[ "$codec" == "hevc" ]]; then
             echo "libx265"
         else
@@ -396,12 +396,16 @@ convert_file() {  # convert_file <file>
     # Check each stream type and only map if present. wc -l output is trimmed
     # because Cygwin's wc pads with leading spaces which confuses [[ -gt 0 ]].
     local _count
-    _count="$("$FFPROBE_BIN" -v quiet -select_streams a         -show_entries stream=index -of csv=p=0 "$src_native" 2>/dev/null | wc -l | tr -d ' ')"
+    _count="$("$FFPROBE_BIN" -v quiet -select_streams a \
+        -show_entries stream=index -of csv=p=0 \
+        "$src_native" 2>/dev/null | tr -d '\r\n ' | wc -c | tr -d ' ')"
     [[ "${_count:-0}" -gt 0 ]] && ffmpeg_opts+=(-map 0:a)
-    _count="$("$FFPROBE_BIN" -v quiet -select_streams s         -show_entries stream=index -of csv=p=0 "$src_native" 2>/dev/null | wc -l | tr -d ' ')"
+    _count="$("$FFPROBE_BIN" -v quiet -select_streams s \
+        -show_entries stream=index -of csv=p=0 \
+        "$src_native" 2>/dev/null | tr -d '\r\n ' | wc -c | tr -d ' ')"
     [[ "${_count:-0}" -gt 0 ]] && ffmpeg_opts+=(-map 0:s)
-    _count="$("$FFPROBE_BIN" -v quiet -select_streams d         -show_entries stream=index -of csv=p=0 "$src_native" 2>/dev/null | wc -l | tr -d ' ')"
-    [[ "${_count:-0}" -gt 0 ]] && ffmpeg_opts+=(-map 0:d)
+    # Data streams (timed_id3, etc.) are intentionally skipped -- they often
+    # contain unsupported codecs that cause ffmpeg to abort the encode.
     # Attachments (-map 0:t) intentionally skipped -- streams with unknown
     # codecs (e.g. kodi XML metadata) cause ffmpeg to corrupt the output.
     # Be explicit about each stream type -- avoids the "Multiple -codec options"
@@ -437,7 +441,6 @@ convert_file() {  # convert_file <file>
             ;;
     esac
     ffmpeg_opts+=(-c:s copy)
-    ffmpeg_opts+=(-c:d copy)
     # Audio: copy if already mp3/aac/eac3; otherwise convert to aac.
     # Check all audio streams in the file -- if any need conversion, use -c:a aac
     # for all (mixing codecs per-stream in MP4 is fragile).
@@ -447,7 +450,7 @@ convert_file() {  # convert_file <file>
         -select_streams a \
         -show_entries stream=codec_name \
         -of csv=p=0 \
-        "$src_native" 2>/dev/null)"
+        "$src_native" 2>/dev/null | tr -d '\r')"
     local needs_audio_convert=false
     while IFS= read -r acodec; do
         [[ -z "$acodec" ]] && continue
