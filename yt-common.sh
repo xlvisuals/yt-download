@@ -18,6 +18,9 @@ setup_logging() {  # setup_logging <log_dir> <script_name>
     mkdir -p "$log_dir" || die "Cannot create log directory: $log_dir"
     local log_file="${log_dir}/${script_name}-$(date +%Y%m%d-%H%M%S).log"
     exec > >(tee -a "$log_file") 2>&1
+    # Export so callers can redirect noisy stderr (e.g. ffmpeg progress) to
+    # the terminal directly, bypassing tee to avoid cluttering the log file.
+    export YT_LOG_FILE="$log_file"
     info "Logging to: $log_file"
 }
 

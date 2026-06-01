@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yt-download.sh -- Download YouTube videos, playlists, and channels
 #
-# Version:   2026-05-25
+# Version:   2026-06-01
 # License:   MIT <https://spdx.org/licenses/MIT.html>
 # Copyright: 2026 Axel Busch
 #
@@ -323,6 +323,10 @@ post_download() {
     [[ "$_POST_DOWNLOAD_DONE" == true ]] && return
     _POST_DOWNLOAD_DONE=true
     [[ -z "${OUT_PREFIX:-}" ]] && return
+    # Clean up any .ytdlp partial download files left by an interrupted yt-dlp run
+    while IFS= read -r -d "" f; do
+        rm -f "$f" && echo "Removed partial download: $f"
+    done < <(find "${OUT_PREFIX%/}" -name "*.ytdlp" -print0 2>/dev/null)
     if [[ "${SIDECAR:-false}" == true ]]; then
         # ZDF movies are flat files in the category dir -- no show/season NFO structure
         [[ "${ZDF_MOVIE:-false}" == false ]] &&             write_nfo_files "$OUT_PREFIX" "${SHOW_TITLE:-}" 2>/dev/null || true

@@ -7,7 +7,7 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 - **`yt-download.sh`** — downloads videos, shorts, playlists, or whole channels from YouTube and ZDF Mediathek — including artwork
 - **`yt-rename.sh`** — renames downloaded files using `.info.json` sidecar metadata
 - **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering
-- **`yt-convert.sh`** — re-encodes large video files to HEVC/h.264 to reduce file size
+- **`yt-convert.sh`** — re-encodes large video files to HEVC/h.264 with two-pass encoding and hardware acceleration
 - **`yt-strip-emoji.sh`** — strips emoji from folder/file names and `.nfo` titles so Jellyfin displays them correctly
 - **`yt-common.sh`** — shared helper library sourced by the other scripts (not run directly)
 
@@ -29,7 +29,7 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 - Skips private or unavailable videos and continues the playlist
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
 - Channel downloads are automatically organised into a named folder
-- Re-encodes large video files to HEVC/h.264 with hardware acceleration (VideoToolbox on macOS, NVENC on Linux/Windows)
+- Re-encodes large video files to HEVC/h.264 with two-pass hardware acceleration; AV1 files follow the same threshold rules as other codecs (use `--convert-av1` to convert AV1 regardless of bitrate)
 - Bundles include ffmpeg, ffplay, and deno — no separate installs needed on macOS and Windows
 - Detects and aborts on YouTube bot/sign-in errors with clear instructions
 - Cookie-based authentication via browser profile or cookies.txt file
@@ -364,13 +364,22 @@ ChessKidOfficial/
 
 ## yt-convert.sh
 
-Re-encodes video files whose bitrate exceeds a threshold, reducing file size without significant quality loss. Particularly useful for ZDF downloads, which are typically 5–6 Mbit h.264 — converting to HEVC at 2 Mbit roughly halves the file size with comparable visual quality.
+Re-encodes `.mp4` and `.mkv` video files whose bitrate exceeds a threshold, reducing file size without significant quality loss. Particularly useful for ZDF downloads (typically 5–8 Mbit h.264) and high-bitrate filesharing files.
 
-Uses hardware-accelerated encoding where available: VideoToolbox on macOS, NVENC on Linux and Windows (falls back to software `libx265`/`libx264` if NVENC is unavailable).
+Uses two-pass encoding for even quality distribution across the file. Hardware-accelerated encoding is used where available. Original files are only replaced after a successful encode, ffprobe verification, and a size sanity check.
 
-Safe to re-run — files already within the target bitrate are skipped automatically. Original files are only deleted after a successful encode and verification.
+Safe to re-run — files already within the target bitrate are skipped automatically.
 
 > **Note:** `yt-convert.sh` requires `ffmpeg` and `ffprobe` to be in `PATH` or in the same folder as the script. All bundles include both.
+
+### Defaults
+
+| Setting | HEVC output | h.264 output |
+|---------|-------------|--------------|
+| Target bitrate | 2.8 Mbit/s | 4 Mbit/s |
+| Threshold | 4 Mbit/s | 6 Mbit/s |
+
+HEVC needs ~40% fewer bits than h.264 for equivalent quality, so the defaults differ by codec. Files already at or below the threshold are left untouched — YouTube (1–2 Mbit) and typical filesharing files (2–3 Mbit HEVC, 3–4 Mbit h.264) are unaffected; ZDF downloads (5–8 Mbit) are converted.
 
 ### Usage
 
@@ -386,8 +395,9 @@ Safe to re-run — files already within the target bitrate are skipped automatic
 | `-a`, `--all` | Process all files recursively under `DIR` |
 | `-4`, `--h264` | Output format h.264 (default: HEVC/h.265) |
 | `-5`, `--h265`, `--hevc` | Output format HEVC/h.265 (default) |
-| `-b`, `--bitrate RATE` | Target bitrate, e.g. `2M` or `1500K` (default: `2M`) |
-| `-t`, `--threshold RATE` | Only convert files above this bitrate (default: `3M`) |
+| `--convert-av1` | Convert AV1 files regardless of bitrate threshold (default: convert only if above threshold) |
+| `-b`, `--bitrate RATE` | Target bitrate, e.g. `2.8M` or `1500K` |
+| `-t`, `--threshold RATE` | Only convert files above this bitrate |
 | `-l`, `--log DIR` | Write log to `DIR/yt-convert-TIMESTAMP.log` (default: current directory) |
 | `-h`, `--help` | Show usage |
 
@@ -400,11 +410,11 @@ Safe to re-run — files already within the target bitrate are skipped automatic
 # Convert all oversized files in a folder tree
 ./yt-convert.sh ~/Videos/ZDF\ Reportagen
 
-# Use a lower threshold to also catch slightly large YouTube files
-./yt-convert.sh --threshold 2.5M ~/Videos/BedtimeHistory
+# Force-convert AV1 files regardless of bitrate (e.g. for iPads without AV1 hardware decode)
+./yt-convert.sh --convert-av1 ~/Videos
 
-# Convert to h.264 instead of HEVC (e.g. for older device compatibility)
-./yt-convert.sh --h264 --bitrate 2M ~/Videos/ZDF\ Reportagen
+# Convert to h.264 instead of HEVC
+./yt-convert.sh --h264 ~/Videos/ZDF\ Reportagen
 
 # Process multiple channels at once
 ./yt-convert.sh --all ~/Videos
@@ -415,20 +425,31 @@ Safe to re-run — files already within the target bitrate are skipped automatic
 
 ### What it does
 
-For each `.mp4` file found:
-1. Reads the video stream bitrate with `ffprobe`
+For each `.mp4` and `.mkv` file found:
+1. Reads the video stream bitrate and codec with `ffprobe`
 2. Skips the file if bitrate is at or below the threshold
-3. Encodes to a temporary `.converting.mp4` file alongside the original
-4. Verifies the output with `ffprobe`
-5. Replaces the original only if encoding and verification succeed — the original is kept untouched on any failure
+3. For AV1 files: converts if above threshold (same as other codecs); with `--convert-av1`, converts regardless of bitrate — useful for devices without AV1 hardware decode such as older iPads
+4. Encodes to a temporary `.converting.mp4/.mkv` file alongside the original using two-pass encoding
+5. Verifies the output with `ffprobe` and checks that the output file is at least 50% of the expected size based on the target/source bitrate ratio — if it is too small, the original is kept and the converted file is left for inspection
+6. Replaces the original only if all checks pass
 
-Audio streams that are already `mp3`, `aac`, or `eac3` are copied unchanged. Other codecs (e.g. `opus`, `vorbis`, `ac3`) are converted to AAC 192k. All audio tracks, subtitle tracks, and attachments are preserved.
+Audio streams that are already `mp3`, `aac`, or `eac3` are copied unchanged. Other codecs (e.g. `opus`, `vorbis`, `ac3`) are converted to AAC 192k. All audio tracks and subtitle tracks are preserved. 10-bit video sources are detected and handled correctly.
+
+### Encoding strategy
+
+Two-pass encoding is used for all encoders to distribute quality evenly across the file (single-pass VBR tends to use too few bits at the start and too many at the end):
+
+| Encoder | Strategy |
+|---------|----------|
+| NVENC | `-multipass fullres` — native full-resolution two-pass in one invocation |
+| VideoToolbox | Quality-based (`-q:v`) — no two-pass API; quality-based encoding distributes detail evenly by design |
+| libx265 / libx264 | Classic two-pass — pass 1 analyses to `/dev/null`, pass 2 encodes using the stats file |
 
 ### Hardware acceleration
 
 | Platform | Encoder used |
 |----------|-------------|
-| macOS | `hevc_videotoolbox` / `h264_videotoolbox` (always available) |
+| macOS | `hevc_videotoolbox` / `h264_videotoolbox` (probed at startup; falls back to `libx265`/`libx264` if not available in the bundled ffmpeg) |
 | Linux / Windows with NVIDIA | `hevc_nvenc` / `h264_nvenc` |
 | Linux / Windows without NVIDIA | `libx265` / `libx264` (software, slower) |
 
