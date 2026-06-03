@@ -346,8 +346,7 @@ convert_file() {  # convert_file <file>
 
     local bitrate; bitrate="$(get_video_bitrate "$src")"
     local codec;   codec="$(get_video_codec "$src")"
-    # Guard arithmetic against empty or non-numeric bitrate values
-    bitrate="${bitrate//[$'\r\n 	']/}"  # strip CRLF/whitespace from Windows ffprobe output
+    bitrate="${bitrate//[$'\r\n 	']/}"
     [[ "$bitrate" =~ ^[0-9]+$ ]] || bitrate=0
     local bitrate_mbit
     local _bm_int=$(( bitrate / 1000000 ))
@@ -399,13 +398,9 @@ convert_file() {  # convert_file <file>
     # Check each stream type and only map if present. wc -l output is trimmed
     # because Cygwin's wc pads with leading spaces which confuses [[ -gt 0 ]].
     local _count
-    _count="$("$FFPROBE_BIN" -v quiet -select_streams a \
-        -show_entries stream=index -of csv=p=0 \
-        "$src_native" 2>/dev/null | tr -d '\r\n ' | wc -c | tr -d ' ')"
+    _count="$("$FFPROBE_BIN" -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$src_native" 2>/dev/null | tr -d '\r\n ' | wc -c | tr -d ' ')"
     [[ "${_count:-0}" -gt 0 ]] && ffmpeg_opts+=(-map 0:a)
-    _count="$("$FFPROBE_BIN" -v quiet -select_streams s \
-        -show_entries stream=index -of csv=p=0 \
-        "$src_native" 2>/dev/null | tr -d '\r\n ' | wc -c | tr -d ' ')"
+    _count="$("$FFPROBE_BIN" -v quiet -select_streams s -show_entries stream=index -of csv=p=0 "$src_native" 2>/dev/null | tr -d '\r\n ' | wc -c | tr -d ' ')"
     [[ "${_count:-0}" -gt 0 ]] && ffmpeg_opts+=(-map 0:s)
     # Data streams (timed_id3, etc.) are intentionally skipped -- they often
     # contain unsupported codecs that cause ffmpeg to abort the encode.
@@ -422,7 +417,7 @@ convert_file() {  # convert_file <file>
     # Without explicit -pix_fmt, NVENC and some other HW encoders silently
     # encode only a handful of frames then stall on 10-bit input.
     local _pix_fmt
-    _pix_fmt="$("$FFPROBE_BIN" -v quiet -select_streams v:0         -show_entries stream=pix_fmt -of csv=p=0         "$src_native" 2>/dev/null | head -1)"
+    _pix_fmt="$("$FFPROBE_BIN" -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$src_native" 2>/dev/null | head -1)"
     case "${_pix_fmt:-}" in
         *10le|*10be|*10*)
             # 10-bit source: NVENC needs p010le but -hwaccel cuda conflicts with it
@@ -447,23 +442,22 @@ convert_file() {  # convert_file <file>
     # Audio: copy if already mp3/aac/eac3; otherwise convert to aac.
     # Check all audio streams in the file -- if any need conversion, use -c:a aac
     # for all (mixing codecs per-stream in MP4 is fragile).
+
+    # --- FIXED AUDIO PARSING (No 'while read' loop) ---
     local audio_codecs
-    audio_codecs="$("$FFPROBE_BIN" \
-        -v quiet \
-        -select_streams a \
-        -show_entries stream=codec_name \
-        -of csv=p=0 \
-        "$src_native" 2>/dev/null | tr -d '\r')"
+    audio_codecs="$("$FFPROBE_BIN" -v quiet -select_streams a -show_entries stream=codec_name -of csv=p=0 "$src_native" 2>/dev/null | tr -d '\r' | tr '\n' ' ')"
+
     local needs_audio_convert=false
-    while IFS= read -r acodec; do
-        [[ -z "$acodec" ]] && continue
+    # Check if audio stream contains anything other than approved formats
+    for acodec in $audio_codecs; do
         case "$acodec" in
-            mp3|aac|eac3) ;;  # compatible, keep as-is
+            mp3|aac|eac3) ;;
             *) needs_audio_convert=true; break ;;
         esac
-    done <<< "$audio_codecs"
+    done
+
     if [[ "$needs_audio_convert" == true ]]; then
-        echo "  (audio codec(s) $(echo "$audio_codecs" | tr '\n' ',' | sed 's/,$//') -> aac)"
+        echo "  (audio codec(s) [${audio_codecs// /, }] -> aac)"
         ffmpeg_opts+=(-c:a aac)
         ffmpeg_opts+=(-b:a 192k)
     else
@@ -483,6 +477,7 @@ convert_file() {  # convert_file <file>
     #   libx265/libx264 -- classic two-pass: pass 1 to /dev/null, pass 2 to output
     local ffmpeg_exit=0
 
+    # --- FIXED FFMPEG INVOCATIONS (Added < /dev/null to protect standard input) ---
     case "$ENCODER" in
         *nvenc*)
             # NVENC multipass: single invocation, full-resolution first pass
@@ -490,9 +485,9 @@ convert_file() {  # convert_file <file>
             ffmpeg_opts+=(-y "$tmp_native")
             echo "  (pass 1+2 via NVENC multipass)"
             if [[ -n "${YT_LOG_FILE:-}" ]]; then
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" 2>/dev/tty || ffmpeg_exit=$?
+                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" 2>/dev/tty < /dev/null || ffmpeg_exit=$?
             else
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" || ffmpeg_exit=$?
+                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" < /dev/null || ffmpeg_exit=$?
             fi
             ;;
         *videotoolbox*)
@@ -508,9 +503,9 @@ convert_file() {  # convert_file <file>
             _opts_nobitrate+=(-q:v 60)   # VideoToolbox quality 0-100, ~60 ≈ 2Mbit
             _opts_nobitrate+=(-y "$tmp_native")
             if [[ -n "${YT_LOG_FILE:-}" ]]; then
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_opts_nobitrate[@]}" 2>/dev/tty || ffmpeg_exit=$?
+                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_opts_nobitrate[@]}" 2>/dev/tty < /dev/null || ffmpeg_exit=$?
             else
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_opts_nobitrate[@]}" || ffmpeg_exit=$?
+                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_opts_nobitrate[@]}" < /dev/null || ffmpeg_exit=$?
             fi
             ;;
         *)
@@ -523,20 +518,20 @@ convert_file() {  # convert_file <file>
             _pass1_opts+=(-pass 1 -passlogfile "$_stats" -f null "$_null_out")
             echo "  (pass 1/2: analysing...)"
             if [[ -n "${YT_LOG_FILE:-}" ]]; then
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_pass1_opts[@]}" 2>/dev/tty || ffmpeg_exit=$?
+                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_pass1_opts[@]}" 2>/dev/tty < /dev/null || ffmpeg_exit=$?
             else
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_pass1_opts[@]}" || ffmpeg_exit=$?
+                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${_pass1_opts[@]}" < /dev/null || ffmpeg_exit=$?
             fi
             # Pass 2: encode using stats from pass 1
             if [[ "$ffmpeg_exit" -eq 0 ]]; then
                 ffmpeg_opts+=(-pass 2 -passlogfile "$_stats")
                 ffmpeg_opts+=(-y "$tmp_native")
                 echo "  (pass 2/2: encoding...)"
-            if [[ -n "${YT_LOG_FILE:-}" ]]; then
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" 2>/dev/tty || ffmpeg_exit=$?
-            else
-                "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" || ffmpeg_exit=$?
-            fi
+                if [[ -n "${YT_LOG_FILE:-}" ]]; then
+                    "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" 2>/dev/tty < /dev/null || ffmpeg_exit=$?
+                else
+                    "$FFMPEG_BIN" -hide_banner -loglevel warning -stats "${ffmpeg_opts[@]}" < /dev/null || ffmpeg_exit=$?
+                fi
             fi
             rm -f "${_stats}" "${_stats}-0.log" "${_stats}-0.log.mbtree" 2>/dev/null
             ;;
@@ -592,26 +587,25 @@ process_dir() {  # process_dir <dir>
     info "Processing: $dir"
     local found=0
 
-    # Collect files into an array first -- avoids pipefail interaction with
-    # sort -z in Cygwin where a null-delimited sort may exit non-zero on
-    # empty input, silently killing the loop under set -euo pipefail.
+    # Read files safely into an array without letting set -e break on pipeline boundaries
     local -a files=()
     while IFS= read -r -d "" file; do
-        files+=("$file")
-    done < <(/usr/bin/find "$dir" -type f \
-                \( -name "*.mp4" -o -name "*.mkv" \) \
-                ! -name "*.converting.mp4" \
-                ! -name "*.converting.mkv" \
-                -print0 2>/dev/null | sort -z || true)
+        [[ -n "$file" ]] && files+=("$file")
+    done < <(/usr/bin/find "$dir" -type f \( -name "*.mp4" -o -name "*.mkv" \) ! -name "*.converting.mp4" ! -name "*.converting.mkv" -print0 2>/dev/null)
 
     if [[ "${#files[@]}" -eq 0 ]]; then
         info "No .mp4 or .mkv files found in $dir"
-        return
+        return 0
     fi
 
+    # Sort the array in native Bash to avoid cross-platform 'sort -z' quirks
+    IFS=$'\n' sorted_files=($(sort <<<"${files[*]}"))
+    unset IFS
+
     for file in "${files[@]}"; do
-        convert_file "$file"
-        (( found++ )) || true
+        # Run in a subshell or protect with || true so one skip/error doesn't kill the entire script
+        convert_file "$file" || echo "  ERROR: Critical failure processing $file"
+        found=$((found + 1))
     done
 
     info "Done. $found file(s) checked."

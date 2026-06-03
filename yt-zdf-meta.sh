@@ -11,19 +11,17 @@
 #   Episodes (season_number: set)  -- reads metadata directly from the
 #            info.json. Writes an <episodedetails> NFO alongside the video file.
 #
-# Works on macOS (BSD grep/sed) and Windows (Cygwin/Git Bash).
+# Works on Linux, macOS (BSD grep/sed) and Windows (Cygwin/Git Bash).
 # Safe to re-run -- existing NFO files are skipped unless --force is set.
+#
+# FIXED: Use grep for ZDF detection, Python stdin for data extraction (no encoding issues)
 
 set -euo pipefail
 
 trap 'echo "Error: script aborted at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=yt-common.sh
 source "${SCRIPT_DIR}/yt-common.sh"
-
-
-# ── Parse arguments ──────────────────────────────────────────────────────────
 
 DRY_RUN=false
 FORCE=false
@@ -44,7 +42,7 @@ Options:
 
 Examples:
   $(basename "$0") ~/Videos/ZDF\ Filme
-  $(basename "$0") ~/Videos                  # searches all ZDF subdirs
+  $(basename "$0") ~/Videos
   $(basename "$0") --force ~/Videos/ZDF\ Dokus
   $(basename "$0") --dry-run ~/Videos
 EOF
@@ -72,25 +70,22 @@ fi
 
 [[ "$DRY_RUN" == true ]] && info "Dry run -- nothing will be written"
 
-
-# ── Detect Python Executable ──────────────────────────────────────────────────
 PYTHON_EXE=""
 if command -v python3 >/dev/null 2>&1; then
     PYTHON_EXE="python3"
 elif command -v python >/dev/null 2>&1; then
-    # Double-check that 'python' is actually Python 3
     if python -c "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)" >/dev/null 2>&1; then
         PYTHON_EXE="python"
     fi
 fi
 
 if [[ -z "$PYTHON_EXE" ]]; then
-    die "Error: This script requires Python 3, but neither 'python3' nor 'python' was found in your PATH."
+    die "Error: This script requires Python 3."
 fi
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-write_file() {  # write_file <path> <content>
+write_file() {
     local path="$1" content="$2"
     if [[ "$DRY_RUN" == true ]]; then
         echo "  WOULD WRITE: $path"
@@ -101,23 +96,19 @@ write_file() {  # write_file <path> <content>
     fi
 }
 
-fetch_page() {  # fetch_page <url> -> stdout
+fetch_page() {
     curl -s --max-time 15 \
         -H "Accept: text/html" \
         -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" \
         "$1" 2>/dev/null | tr -d '\r'
 }
 
-# Parse ZDF movie page HTML and output: title|year|runtime|fsk|genres|description
-# Uses only python3 -- avoids grep -P (not available on macOS/BSD).
-# Accepts the HTML as a file path argument to avoid stdin conflict with heredoc.
-parse_movie_page() {  # parse_movie_page <html_file> -> stdout: field|field|...
+parse_movie_page() {
     "$PYTHON_EXE" - "$1" << 'PYEOF'
 import sys, re
 
 html = open(sys.argv[1], encoding='utf-8', errors='replace').read()
 
-# og: meta tags -- two attribute orderings used by ZDF
 def og(name):
     m = re.search(r'<meta\s+property=["\']og:' + name + r'["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE | re.DOTALL)
     if not m:
@@ -127,19 +118,15 @@ def og(name):
 title       = og('title')
 description = og('description')
 
-# Year: standalone <li>1965</li>
 m = re.search(r'<li>\s*((19|20)\d{2})\s*</li>', html)
 year = m.group(1) if m else ''
 
-# Runtime: match 'N Min.' or 'N&nbsp;Min.' anywhere in the page
 m = re.search(r'(\d{2,3})(?:\s|&nbsp;)+Min\.', html)
 runtime = m.group(1) if m else ''
 
-# FSK: href="/altersfreigabe-ab-12"
 m = re.search(r'altersfreigabe-ab-(\d+)', html)
 fsk = m.group(1) if m else ''
 
-# Genres: links to ZDF category pages, excluding navigation and FSK
 skip_slugs = {
     'altersfreigabe', 'filme', 'serien', 'shows', 'reportagen', 'dokus',
     'magazine', 'kinder', 'live', 'suche', 'mein-zdf', 'nutzungsbedingungen',
@@ -149,7 +136,6 @@ skip_slugs = {
     'live-tv', 'zdfneo', 'zdfinfo',
 }
 genre_set = set()
-# Match href links and their text content
 for slug, label in re.findall(r'href=["\'/]+(?:www\.zdf\.de/)?([a-z][a-z-]*)["\'][^>]*>([^<]+)<', html):
     label = label.strip()
     if (slug not in skip_slugs
@@ -165,7 +151,6 @@ genres = ','.join(sorted(genre_set))
 import html as html_module
 
 def clean(s):
-    # Unescape HTML entities (&quot; &amp; &lt; &gt; etc.) before XML-escaping
     s = html_module.unescape(s)
     return s.replace('|', ' ').replace('\n', ' ').strip()
 
@@ -173,10 +158,7 @@ print('|'.join(clean(x) for x in [title, year, runtime, fsk, genres, description
 PYEOF
 }
 
-
-# ── Movie NFO ────────────────────────────────────────────────────────────────
-
-write_movie_nfo() {  # write_movie_nfo <nfo_path> <page_url> <title_fallback>
+write_movie_nfo() {
     local nfo_path="$1" page_url="$2" title_fallback="$3"
 
     local html
@@ -186,8 +168,6 @@ write_movie_nfo() {  # write_movie_nfo <nfo_path> <page_url> <title_fallback>
         return
     fi
 
-    # Write HTML to temp file -- parse_movie_page uses python3 with a heredoc
-    # which consumes stdin, so we cannot pipe HTML via stdin simultaneously.
     local html_tmp; html_tmp="$(mktemp)"
     printf '%s' "$html" > "$html_tmp"
     local parsed
@@ -200,7 +180,6 @@ write_movie_nfo() {  # write_movie_nfo <nfo_path> <page_url> <title_fallback>
 
     echo "  Title: $title | Year: $year | FSK: $fsk | Runtime: ${runtime}min | Genres: $genres"
 
-    # Build genre XML
     local genre_xml=""
     if [[ -n "$genres" ]]; then
         local g
@@ -221,20 +200,37 @@ write_movie_nfo() {  # write_movie_nfo <nfo_path> <page_url> <title_fallback>
     write_file "$nfo_path" "$nfo"
 }
 
-
-# ── Episode NFO ──────────────────────────────────────────────────────────────
-
-write_episode_nfo() {  # write_episode_nfo <nfo_path> <json_path>
+write_episode_nfo() {
     local nfo_path="$1" json_path="$2"
 
-    local title plot season episode series
-    title="$(  "$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('title',''))"          "$json_path" 2>/dev/null)"
-    plot="$(   "$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('description',''))"    "$json_path" 2>/dev/null)"
-    season="$( "$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); v=d.get('season_number'); print('' if v is None else str(v))" "$json_path" 2>/dev/null)"
-    episode="$("$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); v=d.get('episode_number'); print('' if v is None else str(v))" "$json_path" 2>/dev/null)"
-    series="$( "$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('series',''))"        "$json_path" 2>/dev/null)"
-    # Year from upload_date (format YYYYMMDD) -- the broadcast/availability date
-    aired="$(  "$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); u=d.get('upload_date',''); print(f'{u[:4]}-{u[4:6]}-{u[6:]}' if len(u)==8 else '')" "$json_path" 2>/dev/null)"
+    # Read JSON via stdin (bash reads file correctly, pipes to Python)
+    local json_data
+    json_data=$(cat "$json_path" | "$PYTHON_EXE" -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    title = d.get('title', '')
+    description = d.get('description', '')
+    season = d.get('season_number')
+    episode = d.get('episode_number')
+    series = d.get('series', '')
+    upload_date = d.get('upload_date', '')
+    aired_date = ''
+    if len(upload_date) == 8:
+        aired_date = f'{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}'
+    # Escape pipes to avoid delimiter collision
+    title = title.replace('|', ' ')
+    description = description.replace('|', ' ')
+    series = series.replace('|', ' ')
+    season = '' if season is None else str(int(season))
+    episode = '' if episode is None else str(int(episode))
+    print(f'{title}|{description}|{season}|{episode}|{series}|{aired_date}')
+except Exception as e:
+    print('|||||||')
+" 2>/dev/null)
+
+    local title plot season episode series aired
+    IFS='|' read -r title plot season episode series aired <<< "$json_data"
 
     echo "  Episode S${season}E${episode}: $title"
 
@@ -249,58 +245,7 @@ write_episode_nfo() {  # write_episode_nfo <nfo_path> <json_path>
     write_file "$nfo_path" "$nfo"
 }
 
-
-# ── Process one info.json ─────────────────────────────────────────────────────
-
-#process_info_json() {  # process_info_json <info_json_path>
-#    local json_path="$1"
-#    local dir; dir="$(dirname "$json_path")"
-#    local base; base="$(basename "$json_path" .info.json)"
-#    local nfo_path="${dir}/${base}.nfo"
-#
-#    if [[ -f "$nfo_path" && "$FORCE" == false ]]; then
-#        echo "  SKIP (exists): $(basename "$nfo_path")"
-#        return
-#    fi
-#
-#    local ek
-#    ek=$("$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('extractor_key','').upper())" "$json_path" 2>/dev/null)
-#    if [[ "$ek" != "ZDF" ]]; then
-#        echo "  SKIP (not ZDF): $(basename "$json_path")"
-#        return
-#    fi
-#
-#    local season_number
-#    season_number=$("$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); v=d.get('season_number'); print('' if v is None else str(v))" "$json_path" 2>/dev/null)
-#
-#    if [[ -n "$season_number" ]]; then
-#        write_episode_nfo "$nfo_path" "$json_path"
-#    else
-#        local page_url title_fallback
-#        page_url=$("$PYTHON_EXE" -c "
-#import json, sys, re
-#d = json.load(open(sys.argv[1]))
-#webpage_url = d.get('webpage_url', '')
-#series_id = d.get('series_id', '')
-#m = re.match(r'https?://www\.zdf\.de/(?:video/)?([^/]+)/([^/]+)', webpage_url)
-#if m:
-#    cat, sid = m.group(1), m.group(2)
-#    print(f'https://www.zdf.de/{cat}/{sid}')
-#elif series_id:
-#    print(f'https://www.zdf.de/filme/{series_id}')
-#" "$json_path" 2>/dev/null)
-#        title_fallback=$("$PYTHON_EXE" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('title',''))" "$json_path" 2>/dev/null)
-#
-#        if [[ -z "$page_url" ]]; then
-#            echo "  SKIP (no URL): $(basename "$json_path")"
-#            return
-#        fi
-#        echo "  Movie: $page_url"
-#        write_movie_nfo "$nfo_path" "$page_url" "$title_fallback"
-#    fi
-#}
-
-process_info_json() {  # process_info_json <info_json_path>
+process_info_json() {
     local json_path="$1"
     local dir; dir="$(dirname "$json_path")"
     local base; base="$(basename "$json_path" .info.json)"
@@ -311,65 +256,48 @@ process_info_json() {  # process_info_json <info_json_path>
         return
     fi
 
-    # Save current directory location
-    local current_pwd; current_pwd="$PWD"
-
-    # Change execution context to the file's directory to drop path prefixes
-    cd "$dir" || return
-
-    # Query Python using local directory lookups to bypass Unicode normalization bugs
-    local ek
-    ek=$(PYTHONIOENCODING=utf-8 "$PYTHON_EXE" -c "
-import json, glob, sys
-files = glob.glob('*.info.json')
-if files:
-    with open(files[0], encoding='utf-8') as f:
-        print(json.load(f).get('extractor_key', '').upper())
-" 2>/dev/null)
-
-    if [[ "$ek" != "ZDF" ]]; then
-        echo "  SKIP (not ZDF): $base.info.json"
-        cd "$current_pwd" || return
+    # Check if it's a ZDF file using grep (avoids Python encoding issues entirely)
+    if ! grep -q '"extractor_key": "ZDF"' "$json_path" 2>/dev/null; then
+        echo "  SKIP (not ZDF): $(basename "$json_path")"
         return
     fi
 
+    # Check if it's an episode or movie: read JSON via stdin
     local season_number
-    season_number=$(PYTHONIOENCODING=utf-8 "$PYTHON_EXE" -c "
-import json, glob
-files = glob.glob('*.info.json')
-if files:
-    with open(files[0], encoding='utf-8') as f:
-        v = json.load(f).get('season_number')
-        print('' if v is None else str(v))
+    season_number=$(cat "$json_path" | "$PYTHON_EXE" -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    v = d.get('season_number')
+    print('' if v is None else str(int(v)))
+except Exception:
+    print('')
 " 2>/dev/null)
 
     if [[ -n "$season_number" ]]; then
-        # Restore directory context before executing the sub-write function
-        cd "$current_pwd" || return
         write_episode_nfo "$nfo_path" "$json_path"
     else
-        local page_url title_fallback parsed_data
-        parsed_data=$(PYTHONIOENCODING=utf-8 "$PYTHON_EXE" -c "
-import json, glob, re
-files = glob.glob('*.info.json')
-if files:
-    with open(files[0], encoding='utf-8') as f:
-        d = json.load(f)
-        webpage_url = d.get('webpage_url', '')
-        series_id = d.get('series_id', '')
-        title = d.get('title', '')
-        m = re.match(r'https?://www\.zdf\.de/(?:video/)?([^/]+)/([^/]+)', webpage_url)
-        url = ''
-        if m:
-            url = f'https://www.zdf.de/{m.group(1)}/{m.group(2)}'
-        elif series_id:
-            url = f'https://www.zdf.de/filme/{series_id}'
-        print(f'{url}|{title}')
+        # It's a movie - extract webpage_url and title via stdin
+        local parsed_data
+        parsed_data=$(cat "$json_path" | "$PYTHON_EXE" -c "
+import json, sys, re
+try:
+    d = json.load(sys.stdin)
+    webpage_url = d.get('webpage_url', '')
+    series_id = d.get('series_id', '')
+    title = d.get('title', '')
+    m = re.match(r'https?://www\.zdf\.de/(?:video/)?([^/]+)/([^/]+)', webpage_url)
+    url = ''
+    if m:
+        url = f'https://www.zdf.de/{m.group(1)}/{m.group(2)}'
+    elif series_id:
+        url = f'https://www.zdf.de/filme/{series_id}'
+    print(f'{url}|{title}')
+except Exception:
+    print('')
 " 2>/dev/null)
 
-        # Restore working directory context
-        cd "$current_pwd" || return
-
+        local page_url title_fallback
         IFS='|' read -r page_url title_fallback <<< "$parsed_data"
 
         if [[ -z "$page_url" ]]; then
@@ -380,8 +308,6 @@ if files:
         write_movie_nfo "$nfo_path" "$page_url" "$title_fallback"
     fi
 }
-
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 info "Processing: $TARGET_DIR"
 found=0
