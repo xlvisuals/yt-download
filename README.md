@@ -6,10 +6,12 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 
 - **`yt-download.sh`** — downloads videos, shorts, playlists, or whole channels from YouTube and ZDF Mediathek — including artwork
 - **`yt-rename.sh`** — renames downloaded files using `.info.json` sidecar metadata
-- **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering
-- **`yt-convert.sh`** — re-encodes large video files to HEVC/h.264 with two-pass encoding and hardware acceleration
+- **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering. Requires python3.
+- **`yt-convert.sh`** — re-encodes large video files to HEVC/h.264 with two-pass encoding and hardware acceleration. Requires python3.
 - **`yt-strip-emoji.sh`** — strips emoji from folder/file names and `.nfo` titles so Jellyfin displays them correctly
+- **`yt-zdf-meta.sh`** —  generates Jellyfin `.nfo` files for ZDF shows and movies with information missing from the `.info.json` file (year, plot etc). Requires python3.
 - **`yt-common.sh`** — shared helper library sourced by the other scripts (not run directly)
+
 
 ## Features
 
@@ -50,13 +52,13 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 
 **Bundles** (recommended for most users) are available on the [releases page](../../releases) and include everything needed:
 
-| Bundle | Includes |
-|--------|----------|
-| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
-| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno (Apple Silicon) |
-| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
-| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
-| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno |
+| Bundle | Includes                                                                                                                               |
+|--------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `yt-download_macos_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-zdf-meta.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno  |
+| `yt-download_macos_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-zdf-meta.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno  |
+| `yt-download_linux_x64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-zdf-meta.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno  |
+| `yt-download_linux_aarch64.tar.gz` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-zdf-meta.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno  |
+| `yt-download_windows.zip` | yt-download.sh, yt-rename.sh, yt-nfo.sh, yt-strip-emoji.sh, yt-convert.sh, yt-zdf-meta.sh, yt-common.sh, yt-dlp, ffmpeg, ffplay, deno  |
 
 Extract the archive for your platform and run the scripts from the extracted folder. No other setup required.
 
@@ -358,6 +360,53 @@ ChessKidOfficial/
     season.nfo              <- Season 2: Opening Traps
     poster.jpg              <- playlist artwork
     video [VideoID].mp4
+
+```
+
+---
+
+## yt-zdf-meta.sh
+
+Generates Jellyfin-compatible `.nfo` metadata files for content downloaded from ZDF Mediathek.
+
+While `yt-dlp` collects basic information, it often misses specific structural assets for ZDF media. `yt-zdf-meta.sh` reads the `.info.json` files and determines if the asset is a standalone movie or a show episode to enrich its data profiles differently:
+
+* **Movies:** Scrapes the remote ZDF video page directly to populate rich fields unavailable in the sidecar metadata, such as the exact release **year**, **genres**, **FSK age rating**, **runtime**, and full descriptive **plots**. It saves this into a `<movie>` NFO wrapper alongside the file.
+* **Episodes:** Locally parses the existing `.info.json` payload to accurately assemble an `<episodedetails>` metadata block preserving show titles, season/episode indexes, and formatted broadcast dates.
+
+`yt-zdf-meta.sh` ignored folders starting with a dot, e.g. `,tmp`.
+
+### Usage
+
+```
+./yt-zdf-meta.sh [options] <directory>
+
+```
+
+### Options
+
+| Flag | Description |
+| --- | --- |
+| `-n`, `--dry-run` | Show what would be scraped and written without performing changes |
+| `-f`, `--force` | Force overwrite existing `.nfo` metadata records |
+| `-l`, `--log DIR` | Write log payload to `DIR/yt-zdf-meta-TIMESTAMP.log` (default: current directory) |
+| `-h`, `--help` | Show usage |
+
+### Examples
+
+```bash
+# Generate missing metadata for a specific ZDF movie folder 
+./yt-zdf-meta.sh ~/Videos/ZDF\ Filme
+
+# Recursively crawl and update all subdirectories with missing ZDF metadata
+./yt-zdf-meta.sh ~/Videos
+
+# Force update a folder to replace previously stored NFO details
+./yt-zdf-meta.sh --force ~/Videos/ZDF\ Dokus
+
+# Test layout tracking and extraction without writing output files
+./yt-zdf-meta.sh --dry-run ~/Videos
+
 ```
 
 ---

@@ -79,6 +79,20 @@ done
 [[ -d "$TARGET_DIR" ]] || die "'$TARGET_DIR' is not a directory."
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 
+# ── Detect Python Executable ──────────────────────────────────────────────────
+PYTHON_EXE=""
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_EXE="python3"
+elif command -v python >/dev/null 2>&1; then
+    # Double-check that 'python' is actually Python 3
+    if python -c "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)" >/dev/null 2>&1; then
+        PYTHON_EXE="python"
+    fi
+fi
+
+if [[ -z "$PYTHON_EXE" ]]; then
+    die "Error: This script requires Python 3, but neither 'python3' nor 'python' was found in your PATH."
+fi
 
 # -- Set up logging (after arg parse so --help is fast) --
 
@@ -132,7 +146,7 @@ process_zdf_show() {  # process_zdf_show <show_dir>
     local _first_json
     _first_json="$(find "$show_dir" -name "*.info.json" | head -1)"
     if [[ -n "$_first_json" ]]; then
-        series_name="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('series',''))"             "$_first_json" 2>/dev/null)"
+        series_name=$("$PYTHON_EXE" -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('series',''))"             "$_first_json" 2>/dev/null)
     fi
     [[ -z "$series_name" ]] && series_name="$(basename "$show_dir")"
 
@@ -189,7 +203,7 @@ process_zdf_show() {  # process_zdf_show <show_dir>
             local _sj
             _sj="$(find "$staffel_dir" -name "*.info.json" | head -1)"
             if [[ -n "$_sj" ]]; then
-                season_num="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('season_number',1))"                     "$_sj" 2>/dev/null)"
+                season_num=$("$PYTHON_EXE" -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('season_number',1))"                     "$_sj" 2>/dev/null)
             fi
             [[ -z "$season_num" ]] && season_num=1
         fi

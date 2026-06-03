@@ -729,7 +729,9 @@ build_template() {  # build_template <in_playlist: true|false>
     # Build the full output path depending on download type.
     if [[ "$in_playlist" == movie ]]; then
         # ZDF movie: flat into category dir, filename is "Series (year)"
-        echo "%(series)s (%(release_year,upload_date>%Y)s).%(ext)s"
+        # echo "%(series)s (%(release_year,upload_date>%Y)s).%(ext)s"
+        # Year is often wrong as not in the .info.json, skip it.
+        echo "%(series)s.%(ext)s"
     elif [[ "$in_playlist" == true ]]; then
         if [[ "$IS_ZDF" == true ]]; then
             # ZDF series: series/Staffel N/stem

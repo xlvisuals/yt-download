@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # build-release.sh -- Assemble yt-download release bundles for each platform
 #
-# Version:   2026-06-01
+# Version:   2026-06-03
 # License:   MIT <https://spdx.org/licenses/MIT.html>
 # Copyright: 2026 Axel Busch
 #
 # Downloads the latest yt-dlp, ffmpeg, and ffplay binaries for each platform,
-# packages them with yt-download.sh and README.md, and produces:
+# packages them with yt-download.sh, yt-convert.sh, yt-nfo.sh, yt-rename.sh, yt-strip-emoji.sh, yt-zdf-meta.sh and README.md, and produces:
 #
 #   dist/yt-download_macos.tar.gz
 #   dist/yt-download_linux.tar.gz
 #   dist/yt-download_linux_aarch64.tar.gz
-#   dist/yt-download_windows.zip        (Git Bash / x86_64)
+#   dist/yt-download_windows.zip        (for Cygwin and Git Bash, x86_64)
 
 set -euo pipefail
 
@@ -81,6 +81,7 @@ SCRIPT_DOWNLOAD="${SCRIPT_DIR}/yt-download.sh"
 SCRIPT_NFO="${SCRIPT_DIR}/yt-nfo.sh"
 SCRIPT_RENAME="${SCRIPT_DIR}/yt-rename.sh"
 SCRIPT_EMOJI="${SCRIPT_DIR}/yt-strip-emoji.sh"
+SCRIPT_ZDFMETA="${SCRIPT_DIR}/yt-zdf-meta.sh"
 README="${SCRIPT_DIR}/README.md"
 [[ -f "$SCRIPT_CONVERT" ]]  || die "yt-convert.sh not found in $SCRIPT_DIR"
 [[ -f "$SCRIPT_COMMON" ]]  || die "yt-common.sh not found in $SCRIPT_DIR"
@@ -88,6 +89,7 @@ README="${SCRIPT_DIR}/README.md"
 [[ -f "$SCRIPT_NFO" ]]     || die "yt-nfo.sh not found in $SCRIPT_DIR"
 [[ -f "$SCRIPT_RENAME" ]]  || die "yt-rename.sh not found in $SCRIPT_DIR"
 [[ -f "$SCRIPT_EMOJI" ]]  || die "yt-strip-emoji.sh not found in $SCRIPT_DIR"
+[[ -f "$SCRIPT_ZDFMETA" ]]  || die "yt-zdf-meta.sh not found in $SCRIPT_DIR"
 [[ -f "$README" ]]  || die "README.md not found in $SCRIPT_DIR"
 
 # ─────────────────────────────────────────────
@@ -189,6 +191,7 @@ make_bundle() {
     cp "$SCRIPT_NFO"        "$stage_dir/yt-nfo.sh"
     cp "$SCRIPT_RENAME"     "$stage_dir/yt-rename.sh"
     cp "$SCRIPT_EMOJI"      "$stage_dir/yt-strip-emoji.sh"
+    cp "$SCRIPT_ZDFMETA"    "$stage_dir/yt-zdf-meta.sh"
     cp "$README"            "$stage_dir/README.md"
     cp "$ytdlp_src"         "$stage_dir/$(basename "$ytdlp_src")"
     # Always name ffmpeg/ffplay binaries consistently in the bundle
@@ -216,6 +219,7 @@ make_bundle() {
     chmod +x "$stage_dir/yt-rename.sh"
     chmod +x "$stage_dir/yt-nfo.sh"
     chmod +x "$stage_dir/yt-strip-emoji.sh"
+    chmod +x "$stage_dir/yt-zdf-meta.sh"
 
     local out_file
     if [[ "$arc_type" == "tar" ]]; then

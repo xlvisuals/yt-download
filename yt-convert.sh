@@ -113,7 +113,10 @@ EOF
 
 # Parse a human bitrate string (e.g. "3M", "1500K") to bits/s integer
 parse_bitrate() {  # parse_bitrate <rate_string> -> echo bits/s
-    local r="${1^^}"   # uppercase
+    # Bash 3.2 compatible uppercase conversion using 'tr'
+    local r
+    r="$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+
     if [[ "$r" =~ ^([0-9]+(\.[0-9]+)?)G$ ]]; then
         awk -v n="${BASH_REMATCH[1]}" 'BEGIN { printf "%d\n", n * 1000000000 }'
     elif [[ "$r" =~ ^([0-9]+(\.[0-9]+)?)M$ ]]; then
