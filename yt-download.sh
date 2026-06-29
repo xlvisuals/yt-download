@@ -6,10 +6,15 @@
 # Copyright: 2026 Axel Busch
 #
 # DESCRIPTION
-#   Downloads YouTube and ZDF Mediathek content using yt-dlp. Handles single
-#   videos, playlists, and entire channel/collection libraries. Automatically
-#   downloads and manages yt-dlp, ffmpeg, and deno if bundled versions are
-#   present in the same directory.
+#   Downloads YouTube, ZDF Mediathek, and ARD Mediathek content using yt-dlp.
+#   Handles single videos, playlists, and entire channel/collection libraries.
+#   Automatically downloads and manages yt-dlp, ffmpeg, and deno if bundled
+#   versions are present in the same directory.
+#
+#   ARD Mediathek note: yt-dlp resolves ARD pages to HLS streams and re-extracts
+#   them with the generic extractor, losing original metadata (title, thumbnail).
+#   This script works around that by querying ARD metadata before downloading,
+#   then renaming output files and fetching the thumbnail from the ARD CDN.
 #
 # USAGE
 #   ./yt-download.sh [options] <URL>
@@ -43,6 +48,7 @@
 #   ./yt-download.sh --sidecar --keep-id --append-channel --yes "https://..."
 #   ./yt-download.sh -a -y "https://www.youtube.com/playlist?list=PLxxx"
 #   ./yt-download.sh --jellyfin "https://www.zdf.de/reportagen/magic-pranks-100"
+#   ./yt-download.sh --jellyfin "https://www.ardmediathek.de/video/film/mackie-messer-brechts-dreigroschenfilm/swr/Y3JpZDovL3N3ci5kZS9hZXgvbzEyMzgwMzk"
 #   ./yt-download.sh -u
 #
 # OUTPUT STRUCTURE
@@ -243,6 +249,12 @@ CLEANUP=false
 STRIP_EMOJI=false
 IS_ZDF=false
 ZDF_MOVIE=false   # true when BASE_URL is a ZDF film/movie URL
+IS_ARD=false
+IS_ARD_SERIES=false  # true when BASE_URL is an ARD /serie/ URL
+ARD_CATEGORY=""      # URL path segment, e.g. "film", "serie", "show"
+ARD_SHOW_SLUG=""     # show slug from /serie/<slug>/... for season URL construction
+ARD_SHOW_ID=""       # base64 show ID for season URL construction
+ARD_START_SEASON=1   # season number from the URL (default 1)
 
 usage() {
     cat <<EOF
@@ -328,8 +340,13 @@ post_download() {
         rm -f "$f" && echo "Removed partial download: $f"
     done < <(find "${OUT_PREFIX%/}" -name "*.ytdlp" -print0 2>/dev/null)
     if [[ "${SIDECAR:-false}" == true ]]; then
-        # ZDF movies are flat files in the category dir -- no show/season NFO structure
-        [[ "${ZDF_MOVIE:-false}" == false ]] &&             write_nfo_files "$OUT_PREFIX" "${SHOW_TITLE:-}" 2>/dev/null || true
+        # ZDF movies and ARD single-video downloads are flat files in the category
+        # dir — no show/season NFO structure needed.
+        # ARD series uses the same structure as ZDF series, so write NFOs for those.
+        if [[ "${ZDF_MOVIE:-false}" == false && \
+              ( "${IS_ARD:-false}" == false || "${IS_ARD_SERIES:-false}" == true ) ]]; then
+            write_nfo_files "$OUT_PREFIX" "${SHOW_TITLE:-}" 2>/dev/null || true
+        fi
         fetch_posters "$OUT_PREFIX" 2>/dev/null || true
     fi
     if [[ "${STRIP_EMOJI:-false}" == true ]]; then
@@ -537,8 +554,10 @@ fetch_posters_youtube() {  # fetch_posters_youtube <out_prefix>
 # Called from --posters-only mode and after --sidecar downloads.
 fetch_posters() {  # fetch_posters <out_prefix>
     local out_prefix="$1"
-    if [[ "$IS_ZDF" == true ]]; then
+    if [[ "$IS_ZDF" == true || "$IS_ARD_SERIES" == true ]]; then
         fetch_posters_zdf "$out_prefix"
+    elif [[ "$IS_ARD" == true ]]; then
+        fetch_posters_ard "$out_prefix"
     else
         fetch_posters_youtube "$out_prefix"
     fi
@@ -676,7 +695,7 @@ write_nfo_files() {  # write_nfo_files <out_prefix> [<show_title>]
     local show_title_arg="${2:-}"
     local root_dir="${out_prefix%/}"
     [[ -z "$root_dir" ]] && root_dir="."
-    if [[ "$IS_ZDF" == true ]]; then
+    if [[ "$IS_ZDF" == true || "$IS_ARD_SERIES" == true ]]; then
         write_nfo_files_zdf "$root_dir"
     else
         write_nfo_files_youtube "$root_dir" "$show_title_arg"
@@ -700,19 +719,33 @@ strip_emoji() {
     "$strip_script" "$strip_target" || info "yt-strip-emoji.sh exited non-zero -- check output above"
 }
 
-build_template() {  # build_template <in_playlist: true|false>
+build_template() {  # build_template <in_playlist: true|false> [<literal_season_num>]
     local in_playlist="$1"
-    local title_part="%(title)s"
+    local literal_season="${2:-}"   # when set, replaces %(season_number)s in ARD templates
 
-    # Append channel name if requested.
-    # %(channel,series)s: use channel for YouTube, fall back to series for ZDF
-    # (ZDF videos have no channel but always have a series name).
-    # Note: yt-dlp templates cannot check if the channel name is already
-    # in the video title, so duplication is possible for videos that include
-    # the channel name in their title. Use dejellyfin --append-channel instead
-    # if you want deduplication after the fact.
+    # ARD: prefer %(episode)s (clean title without episode-number suffix like " (3)")
+    # over %(title)s which includes it. Fall back to %(title)s if episode is absent.
+    # For YouTube/ZDF, %(title)s is always correct.
+    local title_part
+    if [[ "$IS_ARD" == true ]]; then
+        title_part="%(episode,title)s"
+    else
+        title_part="%(title)s"
+    fi
+
+    # Append series/channel name if requested.
+    # ARD: use %(series)s — it is the show name ("Leben im Spektrum"), never the
+    #      broadcaster acronym ("MDR"). %(channel)s on ARD is the broadcaster.
+    # YouTube/ZDF: %(channel,series)s — channel for YouTube, series for ZDF
+    #      (ZDF videos have no channel but always have a series name).
+    # Note: yt-dlp templates cannot check if the name is already in the title,
+    # so duplication is possible. Use --append-channel selectively if needed.
     if [[ "$APPEND_CHANNEL" == true ]]; then
-        title_part="${title_part} - %(channel,series)s"
+        if [[ "$IS_ARD" == true ]]; then
+            title_part="${title_part} - %(series)s"
+        else
+            title_part="${title_part} - %(channel,series)s"
+        fi
     fi
 
     # Wrap with index
@@ -733,13 +766,21 @@ build_template() {  # build_template <in_playlist: true|false>
         # Year is often wrong as not in the .info.json, skip it.
         echo "%(series)s.%(ext)s"
     elif [[ "$in_playlist" == true ]]; then
-        if [[ "$IS_ZDF" == true ]]; then
-            # ZDF series: series/Staffel N/stem
+        if [[ "$IS_ZDF" == true || "$IS_ARD_SERIES" == true ]]; then
+            # ZDF and ARD series: series/Staffel N/stem
             # Use literal slashes in the template (path separators) rather than
             # producing "/" via a conditional substitution -- yt-dlp sanitises
             # slash characters from field evaluation into ⧸ (U+29F8 BIG SOLIDUS).
-            # Movies never reach this branch (they use build_template "movie").
-            echo "%(series)s/Staffel %(season_number)s/${stem}.%(ext)s"
+            # ZDF movies never reach this branch (they use build_template "movie").
+            # ARD series: season_number is not in episode metadata, so we use the
+            # literal season number captured during URL enumeration when available.
+            local _snum_field
+            if [[ -n "$literal_season" ]]; then
+                _snum_field="$literal_season"
+            else
+                _snum_field="%(season_number)s"
+            fi
+            echo "%(series)s/Staffel ${_snum_field}/${stem}.%(ext)s"
         else
             echo "%(playlist_title,series)s/${stem}.%(ext)s"
         fi
@@ -781,6 +822,16 @@ classify_url() {  # classify_url <url>
         else
             echo show
         fi
+    # ARD Mediathek: /video/ URLs are single episodes.
+    # /serie/, /sendung/, /sammlung/ URLs are playlists (either seasonised series
+    # or flat shows — both download as playlists).
+    elif [[ "$url" == *"ardmediathek.de/"* ]]; then
+        if [[ "$IS_ARD_SERIES" == true ]] || \
+           echo "$url" | grep -qE "ardmediathek\.de/[^/]*(serie|sendung|sammlung)"; then
+            echo playlist
+        else
+            echo video
+        fi
     else
         echo video
     fi
@@ -795,10 +846,67 @@ run_download() {  # run_download <out_prefix> <url1> [<url2> ...]
     for url in "$@"; do
         OUT_PREFIX="$_prefix"
         OPTS=("${BASE_OPTS[@]}")
+
+        # ARD series: filter out "mit Gebärdensprache" episodes at download time.
+        # This only applies to series URLs — individual video URLs are never filtered.
+        if [[ "$IS_ARD_SERIES" == true ]]; then
+            OPTS+=("--match-filter" "title!~=mit Gebärdensprache")
+        fi
+
+        # ARD single-video workaround: yt-dlp re-extracts the HLS manifest with the
+        # generic extractor, losing the original title (returns "NA") and using the
+        # raw HLS stream filename as the video ID.  Work around this by:
+        #   1. Querying the ARD page for title+thumbnail URL *before* downloading.
+        #   2. Falling back to the slug-derived title if yt-dlp still returns NA.
+        #   3. Renaming output files and fetching the thumbnail afterwards.
+        # For series, the ARDMediathekCollectionIE + ARDBetaMediathekIE chain handles
+        # metadata correctly, so this block is only needed for /video/ URLs.
+        ARD_RESOLVED_TITLE=""
+        ARD_SERIES=""
+        ARD_THUMBNAIL_URL=""
+        if [[ "$IS_ARD" == true && "$IS_ARD_SERIES" == false ]]; then
+            info "Querying ARD metadata for title and thumbnail..."
+            local _ard_title _ard_episode _ard_series _ard_thumb
+            _ard_title="$("$YTDLP_BIN" \
+                --no-playlist --playlist-items 1 \
+                --print "%(title)s" --quiet \
+                "$url" 2>/dev/null | head -1 || true)"
+            _ard_episode="$("$YTDLP_BIN" \
+                --no-playlist --playlist-items 1 \
+                --print "%(episode)s" --quiet \
+                "$url" 2>/dev/null | head -1 || true)"
+            _ard_series="$("$YTDLP_BIN" \
+                --no-playlist --playlist-items 1 \
+                --print "%(series)s" --quiet \
+                "$url" 2>/dev/null | head -1 || true)"
+            _ard_thumb="$("$YTDLP_BIN" \
+                --no-playlist --playlist-items 1 \
+                --print "%(thumbnail)s" --quiet \
+                "$url" 2>/dev/null | head -1 || true)"
+            # Prefer episode (clean title without " (N)" suffix) over full title
+            local _best_title=""
+            if [[ -n "$_ard_episode" && "$_ard_episode" != "NA" ]]; then
+                _best_title="$_ard_episode"
+            elif [[ -n "$_ard_title" && "$_ard_title" != "NA" ]]; then
+                _best_title="$_ard_title"
+            fi
+            if [[ -n "$_best_title" ]]; then
+                ARD_RESOLVED_TITLE="$(sanitise "$(strip_ard_broadcaster "$_best_title")")"
+                info "ARD title from metadata: $ARD_RESOLVED_TITLE"
+            else
+                ARD_RESOLVED_TITLE="$(sanitise "${ARD_TITLE_FROM_SLUG:-}")"
+                info "ARD title from slug fallback: $ARD_RESOLVED_TITLE"
+            fi
+            if [[ -n "$_ard_series" && "$_ard_series" != "NA" ]]; then
+                ARD_SERIES="$(sanitise "$(strip_ard_broadcaster "$_ard_series")")"
+            fi
+            [[ -n "$_ard_thumb" && "$_ard_thumb" != "NA" ]] && ARD_THUMBNAIL_URL="$_ard_thumb"
+        fi
+
         case "$(classify_url "$url")" in
-            playlist|show) OPTS+=("--yes-playlist"); OUT_TEMPLATE="${_prefix}$(build_template true)"  ;;
-            movie)         OPTS+=("--no-playlist");  OUT_TEMPLATE="${_prefix}$(build_template movie)" ;;
-            video)         OPTS+=("--no-playlist");  OUT_TEMPLATE="${_prefix}$(build_template false)" ;;
+            playlist|show) OPTS+=("--yes-playlist"); OUT_TEMPLATE="${_prefix}$(build_template true  "${ARD_CURRENT_SEASON:-}")"  ;;
+            movie)         OPTS+=("--no-playlist");  OUT_TEMPLATE="${_prefix}$(build_template movie "${ARD_CURRENT_SEASON:-}")" ;;
+            video)         OPTS+=("--no-playlist");  OUT_TEMPLATE="${_prefix}$(build_template false "${ARD_CURRENT_SEASON:-}")" ;;
         esac
         check_dir="${_prefix:-.}"
         check_dir="${check_dir%/}"
@@ -830,6 +938,82 @@ run_download() {  # run_download <out_prefix> <url1> [<url2> ...]
             rm -f "$ytdlp_out"
             die "yt-dlp exited with error code $ytdlp_exit -- aborting"
         fi
+
+        # ARD single-video post-download fixes (not applicable to series — the
+        # ARDMediathekCollectionIE chain handles series metadata correctly):
+        # (a) Rename files that yt-dlp named with "NA" or raw HLS stems.
+        # (b) Strip standalone broadcaster tokens (MDR, SWR, …) from filenames.
+        if [[ "$IS_ARD" == true && "$IS_ARD_SERIES" == false && -n "$ARD_RESOLVED_TITLE" ]]; then
+            local _dest_dir="${_prefix%/}"
+            [[ -z "$_dest_dir" ]] && _dest_dir="."
+            while IFS= read -r _f; do
+                local _base _ext _stem _new_stem _new_path
+                _base="$(basename "$_f")"
+                _ext="${_base##*.}"
+                _stem="${_base%.*}"
+
+                # Determine whether this file needs renaming:
+                # - stem has literal "NA" where title/channel should be, OR
+                # - stem is a raw HLS filename, OR
+                # - stem contains a standalone broadcaster token to be stripped
+                local _needs_rename=false
+                if [[ "$_stem" == *" NA "* || "$_stem" == *" - NA"* || \
+                      "$_stem" =~ ^index-f[0-9]+-v[0-9]+-a[0-9]+ ]]; then
+                    _needs_rename=true
+                elif echo "$_stem" | grep -qE "(^|[[:space:]_-])(${_ARD_BC_ALL})([[:space:]_-]|$)"; then
+                    _needs_rename=true
+                fi
+                [[ "$_needs_rename" == false ]] && continue
+
+                # Preserve [ID] suffix when KEEP_ID produced one
+                local _id_suffix=""
+                if [[ "$_stem" =~ \[([A-Za-z0-9_-]+)\]$ ]]; then
+                    _id_suffix=" [${BASH_REMATCH[1]}]"
+                fi
+
+                # For files already correctly named by ARDMediathek extractor,
+                # strip broadcaster from the existing stem rather than rebuilding
+                # from scratch — preserves any extra info yt-dlp embedded.
+                if [[ "$_stem" == *" NA "* || "$_stem" == *" - NA"* || \
+                      "$_stem" =~ ^index-f[0-9]+-v[0-9]+-a[0-9]+ ]]; then
+                    # Rebuild from resolved metadata
+                    local _series_label="${ARD_SERIES:-}"
+                    if [[ "$APPEND_CHANNEL" == true && -n "$_series_label" ]]; then
+                        _new_stem="${ARD_RESOLVED_TITLE} - ${_series_label}${_id_suffix}"
+                    else
+                        _new_stem="${ARD_RESOLVED_TITLE}${_id_suffix}"
+                    fi
+                else
+                    # Strip broadcaster token(s) from existing stem
+                    _new_stem="$(strip_ard_broadcaster "$_stem")"
+                    # Also collapse " - - " that can result from stripping " - MDR - "
+                    _new_stem="${_new_stem// - - / - }"
+                fi
+
+                _new_stem="$(sanitise "$_new_stem")"
+                _new_path="$(dirname "$_f")/${_new_stem}.${_ext}"
+                if [[ "$_f" != "$_new_path" ]]; then
+                    mv "$_f" "$_new_path"
+                    info "ARD rename: $(basename "$_f") -> $(basename "$_new_path")"
+                fi
+            done < <(find "$_dest_dir" -maxdepth 1 -type f \
+                \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \
+                   -o -name "*.mp3" -o -name "*.m4a" -o -name "*.json" \
+                   -o -name "*.jpg" -o -name "*.srt" \) 2>/dev/null)
+
+            # If the sidecar thumbnail is still missing (generic extractor skips
+            # thumbnails for HLS streams), fetch it directly from the ARD CDN.
+            if [[ -n "$ARD_THUMBNAIL_URL" && "$SIDECAR" == true ]]; then
+                local _dest_abs; _dest_abs="$(cd "$_dest_dir" && pwd)"
+                local _expect_jpg="${_dest_abs}/${ARD_RESOLVED_TITLE}.jpg"
+                if [[ ! -f "$_expect_jpg" ]]; then
+                    info "Fetching ARD thumbnail from CDN..."
+                    fetch "$ARD_THUMBNAIL_URL" "$_expect_jpg" 2>/dev/null || \
+                        info "Could not fetch ARD thumbnail -- skipping"
+                fi
+            fi
+        fi
+
         rm -f "$ytdlp_out"
     done
 }
@@ -905,6 +1089,126 @@ resolve_output_dir_zdf() {
     info "Output directory from ZDF URL category: $CHANNEL_NAME"
 }
 
+# ARD member broadcaster acronyms to strip from titles and folder names.
+# These indicate which ARD Landesrundfunkanstalt contributed the content;
+# they are not part of the show title or a meaningful folder label.
+# Both UPPER and Title-case variants are listed for portability (BSD sed on
+# macOS does not support the /I case-insensitive flag in -E mode).
+ARD_BROADCASTERS="ARD|DW|BR|HR|MDR|NDR|RBB|SR|SWR|WDR"
+ARD_BROADCASTERS_TC="Ard|Dw|Br|Hr|Mdr|Ndr|Rbb|Sr|Swr|Wdr"
+_ARD_BC_ALL="${ARD_BROADCASTERS}|${ARD_BROADCASTERS_TC}"
+
+# Strip standalone ARD broadcaster tokens from a string.
+# Removes the token when it appears as a whole word (surrounded by spaces,
+# hyphens, underscores, or string boundaries), then collapses orphaned
+# separators and extra whitespace.
+strip_ard_broadcaster() {  # strip_ard_broadcaster <string>
+    echo "$1" \
+        | sed -E "s/(^|[[:space:]_-])(${_ARD_BC_ALL})([[:space:]_-]|$)/\1\3/g" \
+        | sed -E "s/(^|[[:space:]_-])(${_ARD_BC_ALL})([[:space:]_-]|$)/\1\3/g" \
+        | sed 's/ - - / - /g' \
+        | sed 's/ -  / /g' \
+        | sed 's/  - $//; s/ - $//' \
+        | sed 's/  */ /g' \
+        | sed 's/^[[:space:]_-]*//' \
+        | sed 's/[[:space:]_-]*$//'
+}
+
+# Resolve output dir for ARD Mediathek.
+#
+# /video/ URL structure: /video/<category>/<slug>/<broadcaster>/<id>
+#   Folder: "ARD <Category>" — broadcaster excluded (it's the Landesrundfunkanstalt,
+#   not the show). Slug-derived title kept as fallback for metadata failures.
+#
+# /serie/ URL structure: /serie/<show-slug>/[<season-slug>/<show-id>/<season-num>]
+#   Folder: "ARD Serie" — show name comes from %(series)s in the yt-dlp template,
+#   which creates the show subfolder automatically (mirrors ZDF series behaviour).
+#   ARD_SHOW_SLUG, ARD_SHOW_ID, ARD_START_SEASON are stored for season enumeration.
+resolve_output_dir_ard() {
+    IS_ARD=true
+    # Strip scheme and host
+    local _path="${BASE_URL#*ardmediathek.de/}"
+    local _type; _type="${_path%%/*}"; _path="${_path#*/}"
+    ARD_CATEGORY="$_type"
+
+    if [[ "$_type" == "serie" || "$_type" == "sendung" || "$_type" == "sammlung" ]]; then
+        # Strip any query string from the path before parsing segments —
+        # e.g. ?isChildContent must not end up inside ARD_SHOW_ID.
+        local _path_no_qs="${_path%%\?*}"
+        # _path_no_qs is now: <show-slug>/[<season-slug>/<show-id>/<season-num>]
+        ARD_SHOW_SLUG="${_path_no_qs%%/*}"; _path_no_qs="${_path_no_qs#*/}"
+        # Next segment is either the season slug (staffel-N) or the show ID
+        local _next; _next="${_path_no_qs%%/*}"
+        if [[ "$_next" =~ ^staffel-[0-9]+ || "$_next" =~ ^[0-9]+$ ]]; then
+            # season-slug/<show-id>/<season-num>
+            _path_no_qs="${_path_no_qs#*/}"                       # skip season slug
+            ARD_SHOW_ID="${_path_no_qs%%/*}"; _path_no_qs="${_path_no_qs#*/}"
+            local _snum; _snum="${_path_no_qs%%/*}"
+            [[ "$_snum" =~ ^[0-9]+$ ]] && ARD_START_SEASON="$_snum"
+        else
+            # <show-id> directly (no season in URL)
+            ARD_SHOW_ID="$_next"
+            ARD_START_SEASON=1
+        fi
+        # Only /serie/ URLs have proper season structure worth enumerating.
+        # /sendung/ is a flat recurring programme (e.g. a daily show); /sammlung/
+        # is a curated collection. Both download as a single flat playlist.
+        if [[ "$_type" == "serie" ]]; then
+            IS_ARD_SERIES=true
+        fi
+        CHANNEL_NAME="ARD Serie"
+        SHOW_TITLE="$CHANNEL_NAME"
+        CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
+        info "ARD series URL detected: show='$ARD_SHOW_SLUG' id='$ARD_SHOW_ID' start_season=$ARD_START_SEASON"
+        info "Output directory: $CHANNEL_NAME"
+    else
+        # /video/ or other single-content URL
+        local _category; _category="$_type"
+        local _slug    ; _slug="${_path%%/*}"; _path="${_path#*/}"
+        local _broadcaster; _broadcaster="${_path%%/*}"
+
+        # Human-readable category label (title-case, hyphens -> spaces)
+        local _cat_label
+        _cat_label="$(echo "$_category" | tr '-' ' ' | \
+            awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')"
+
+        # Derive title from slug: replace hyphens with spaces, title-case each word.
+        # Strip any broadcaster token that may have crept into the slug.
+        ARD_TITLE_FROM_SLUG="$(echo "$_slug" | tr '-' ' ' | \
+            awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')"
+        ARD_TITLE_FROM_SLUG="$(strip_ard_broadcaster "$ARD_TITLE_FROM_SLUG")"
+
+        # Folder: "ARD <Category>" — no broadcaster token
+        CHANNEL_NAME="ARD ${_cat_label}"
+        SHOW_TITLE="$CHANNEL_NAME"
+        CHANNEL_NAME="$(sanitise "$CHANNEL_NAME")"
+        info "Output directory from ARD URL: $CHANNEL_NAME"
+        info "Title derived from slug: $ARD_TITLE_FROM_SLUG"
+    fi
+}
+
+# ARD: yt-dlp loses thumbnail/title when re-extracting the HLS stream.
+# The sidecar .jpg written during download IS the episode thumbnail — copy it as
+# poster.jpg in the output folder so Jellyfin picks it up.
+fetch_posters_ard() {  # fetch_posters_ard <out_prefix>
+    local out_prefix="$1"
+    [[ -z "$out_prefix" || ! -d "${out_prefix%/}" ]] && return
+    local ard_root="${out_prefix%/}"
+    local poster="${ard_root}/poster.jpg"
+    if [[ -f "$poster" ]]; then
+        info "ARD poster already present: $poster"
+        return
+    fi
+    local first_jpg
+    first_jpg="$(find "$ard_root" -maxdepth 1 -name "*.jpg" ! -name "poster.jpg" | sort | head -1)"
+    if [[ -n "$first_jpg" ]]; then
+        cp "$first_jpg" "$poster"
+        info "Written ARD poster (from sidecar): $poster"
+    else
+        info "No sidecar .jpg found for ARD poster -- skipping"
+    fi
+}
+
 # Resolve output dir for YouTube: ask yt-dlp for the uploader display name,
 # with handle and "download/" as fallbacks.
 resolve_output_dir_youtube() {
@@ -953,9 +1257,13 @@ resolve_output_dir_youtube() {
 if [[ -n "$OUTPUT_DIR" ]]; then
     mkdir -p "$OUTPUT_DIR" || die "Cannot create output directory: $OUTPUT_DIR"
     OUT_PREFIX="${OUTPUT_DIR}/"
+    # Even with an explicit -o DIR we still need IS_ARD/IS_ARD_SERIES set for template/poster logic
+    [[ "$BASE_URL" == *"ardmediathek.de/"* ]] && { IS_ARD=true; resolve_output_dir_ard; }
 else
     if [[ "$BASE_URL" == *"zdf.de/"* ]]; then
         resolve_output_dir_zdf
+    elif [[ "$BASE_URL" == *"ardmediathek.de/"* ]]; then
+        resolve_output_dir_ard
     else
         resolve_output_dir_youtube
     fi
@@ -1028,6 +1336,83 @@ expand_urls_youtube_channel() {
     rm -f "$stderr_tmp"
 }
 
+# ARD series: probe season URLs iteratively (staffel-1/.../1, staffel-2/.../2 …)
+# until yt-dlp returns an empty playlist — that marks the end of the show.
+# Seasons whose playlist_title contains "mit Audiodeskription" are skipped.
+# Surviving season URLs go into urls[]; their season numbers into ard_season_numbers[].
+ard_season_numbers=()
+expand_urls_ard_series() {
+    info "Discovering seasons for ARD series '${ARD_SHOW_SLUG}' ..."
+    local _season="$ARD_START_SEASON"
+    local _max_empty=2   # stop after this many consecutive empty/error seasons
+    local _consecutive_empty=0
+    local _first_title=""  # season title seen on the very first probe
+    local _flat_show=false # true when the API returns the same title for every season
+    local stderr_tmp; stderr_tmp="$(mktemp)"
+
+    while true; do
+        local _season_url="https://www.ardmediathek.de/${ARD_CATEGORY}/${ARD_SHOW_SLUG}/staffel-${_season}/${ARD_SHOW_ID}/${_season}"
+        # Get the playlist_title for this season (first non-empty line is the season name)
+        local _season_title
+        _season_title="$("$YTDLP_BIN" \
+            --flat-playlist \
+            --print "%(playlist_title)s" \
+            --quiet \
+            "$_season_url" 2>"$stderr_tmp" | grep -v '^$\|^NA$' | head -1 || true)"
+
+        if [[ -z "$_season_title" ]]; then
+            (( _consecutive_empty++ )) || true
+            if [[ "$_consecutive_empty" -ge "$_max_empty" ]]; then
+                break
+            fi
+            (( _season++ )) || true
+            continue
+        fi
+        _consecutive_empty=0
+
+        # Flat-show detection: if the first two seasons return the same title
+        # and it contains no "Staffel" indicator, the API is just echoing the
+        # show title for any season number — this is a flat playlist, not a
+        # seasonised series. Fall back to downloading the original URL directly.
+        if [[ -z "$_first_title" ]]; then
+            _first_title="$_season_title"
+        elif [[ "$_season" -eq $(( ARD_START_SEASON + 1 )) && \
+                "$_season_title" == "$_first_title" ]] && \
+             ! echo "$_first_title" | grep -qi "staffel"; then
+            info "Season titles are identical ('$_first_title') — show has no seasons, downloading as flat playlist."
+            _flat_show=true
+            break
+        fi
+
+        # Skip seasons with Audiodeskription
+        if echo "$_season_title" | grep -qi "mit Audiodeskription"; then
+            info "Skipping season (Audiodeskription): $_season_title"
+            (( _season++ )) || true
+            continue
+        fi
+
+        info "Found season $_season: $_season_title"
+        urls+=("$_season_url")
+        ard_season_numbers+=("$_season")
+        (( _season++ )) || true
+    done
+
+    rm -f "$stderr_tmp"
+
+    # Flat show: discard any season URLs and use the original URL as a single playlist
+    if [[ "$_flat_show" == true ]]; then
+        urls=("$BASE_URL")
+        ard_season_numbers=()
+        IS_ARD_SERIES=false   # treat as a plain playlist from here on
+        return
+    fi
+
+    if [[ ${#urls[@]} -eq 0 ]]; then
+        die "No downloadable seasons found for '${ARD_SHOW_SLUG}'. Check the URL."
+    fi
+    info "Found ${#urls[@]} season(s) to download."
+}
+
 info "Fetching content from $BASE_URL"
 urls=()
 
@@ -1041,8 +1426,11 @@ if [[ "$BASE_URL" == *"youtube.com/playlist?list="* || \
    [[ "$IS_ZDF" == true && ( "$BASE_URL" == *"?staffel="* || \
                               "$_url_no_qs" == *"zdf.de/video/"* || \
                               "$_url_no_qs" == *"zdf.de/play/"* || \
-                              "$_url_no_qs" == *".html" ) ]]; then
+                              "$_url_no_qs" == *".html" ) ]] || \
+   [[ "$IS_ARD" == true && "$IS_ARD_SERIES" == false ]]; then
     expand_urls_direct
+elif [[ "$IS_ARD_SERIES" == true ]]; then
+    expand_urls_ard_series
 elif [[ "$IS_ZDF" == true ]]; then
     expand_urls_zdf_show
 else
@@ -1195,7 +1583,18 @@ BASE_OPTS+=("--no-overwrites")
 
 # -- 12. Run main download --
 
-run_download "$OUT_PREFIX" "${urls[@]}"
+ARD_CURRENT_SEASON=""   # set per-season for ARD series; empty otherwise
+
+if [[ "$IS_ARD_SERIES" == true ]]; then
+    # ARD series: download each season individually so we can pass the literal
+    # season number into the output template (%(season_number)s is NA in ARD metadata).
+    for _i in "${!urls[@]}"; do
+        ARD_CURRENT_SEASON="${ard_season_numbers[$_i]}"
+        run_download "$OUT_PREFIX" "${urls[$_i]}"
+    done
+else
+    run_download "$OUT_PREFIX" "${urls[@]}"
+fi
 
 # If a bare channel URL was given, process remaining endpoints
 if [[ -n "${ENDPOINTS[*]+x}" && ${#ENDPOINTS[@]} -gt 1 ]]; then

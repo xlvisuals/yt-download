@@ -1,10 +1,10 @@
 # yt-download suite
 
-A set of bash scripts to download and organise YouTube and ZDF Mediathek videos, playlists, and channels — with sane filenames across all platforms.
+A set of bash scripts to download and organise YouTube, ZDF Mediathek, and ARD Mediathek videos, playlists, and channels — with sane filenames across all platforms.
 
 ## Scripts
 
-- **`yt-download.sh`** — downloads videos, shorts, playlists, or whole channels from YouTube and ZDF Mediathek — including artwork
+- **`yt-download.sh`** — downloads videos, shorts, playlists, or whole channels from YouTube, ZDF Mediathek, and ARD Mediathek — including artwork
 - **`yt-rename.sh`** — renames downloaded files using `.info.json` sidecar metadata
 - **`yt-nfo.sh`** — generates Jellyfin `season.nfo` and `tvshow.nfo` files to fix season numbering. Requires python3.
 - **`yt-convert.sh`** — re-encodes large video files to HEVC/h.264 with two-pass encoding and hardware acceleration. Requires python3.
@@ -15,7 +15,7 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 
 ## Features
 
-- Downloads single videos, playlists, or whole channels from YouTube and ZDF Mediathek
+- Downloads single videos, playlists, or whole channels from YouTube, ZDF Mediathek, and ARD Mediathek
 - Downloads are compatible with [jellyfin-youtube-metadata-plugin](https://github.com/ankenyr/jellyfin-youtube-metadata-plugin) and [jf-ytdlp-info-reader-plugin](https://github.com/ArabCoders/jf-ytdlp-info-reader-plugin/)
 - Automatically downloads and manages [yt-dlp](https://github.com/yt-dlp/yt-dlp) — no manual setup needed
 - Embeds English subtitles as `.srt` into the video file
@@ -27,7 +27,7 @@ A set of bash scripts to download and organise YouTube and ZDF Mediathek videos,
 - Saves `.info.json` and thumbnail sidecars for Jellyfin and similar media servers
 - Generates Jellyfin `season.nfo` files to fix incorrect season numbering
 - Strips emoji from folder/file names and `.nfo` titles for Jellyfin compatibility
-- Saves `poster.jpg` in channel and playlist folders for series/season artwork (YouTube: fetched from yt-dlp; ZDF: copied from the first episode's thumbnail sidecar, so `--sidecar` must be active)
+- Saves `poster.jpg` in channel and playlist folders for series/season artwork (YouTube: fetched from yt-dlp; ZDF and ARD: copied from the first episode's thumbnail sidecar, so `--sidecar` must be active)
 - Skips private or unavailable videos and continues the playlist
 - Filenames safe on Windows (NTFS/exFAT), macOS (APFS/HFS+), and Linux (ext4)
 - Channel downloads are automatically organised into a named folder
@@ -163,6 +163,25 @@ ZDF URLs are detected automatically. The output folder is named from the URL cat
 
 > **ZDF poster artwork:** ZDF's API does not expose dedicated show or season poster images. Instead, the script copies the first downloaded episode's thumbnail as `poster.jpg` into each season folder, and the earliest season's poster into the show folder. This requires `--sidecar` (included in `--jellyfin`) to be active — without it, no thumbnails are downloaded and no posters are created. `--posters-only` has no effect on ZDF URLs for the same reason.
 
+**Download from ARD Mediathek:**
+```bash
+# Single video
+./yt-download.sh --jellyfin "https://www.ardmediathek.de/video/film/mackie-messer-brechts-dreigroschenfilm/swr/Y3JpZDovL3N3ci5kZS9hZXgvbzEyMzgwMzk"
+
+# Series (all seasons, Jellyfin-ready)
+./yt-download.sh --jellyfin "https://www.ardmediathek.de/serie/leben-im-spektrum/staffel-1/Y3JpZDovL21kci5kZS9zZW5kZXJlaWhlbi80YjAwNDg1Ni05YmIzLTRmYTYtOWI2ZC04OWRkN2I4Yjc2ODc/1"
+
+# Flat show (e.g. a recurring programme — downloads as a single playlist)
+./yt-download.sh --jellyfin "https://www.ardmediathek.de/sendung/der-elefant/Y3JpZDovL3dkci5kZS9tZGIvNDM4L0RlciBFbGVmYW50"
+```
+ARD URLs are detected automatically. The output folder is named `ARD Serie`, `ARD Film`, etc. from the URL type, with the show name as a subfolder (from the video metadata).
+
+ARD series (`/serie/`) are downloaded season by season. Two types of content are automatically skipped:
+- Seasons whose title contains **"mit Audiodeskription"** (audio description track versions)
+- Episodes whose title contains **"mit Gebärdensprache"** (sign language versions)
+
+> **ARD poster artwork:** The same approach as ZDF applies — `poster.jpg` is copied from the first episode's thumbnail sidecar per season folder, and from the earliest season into the show folder. Requires `--sidecar` (included in `--jellyfin`). ARD broadcaster labels (MDR, SWR, WDR, etc.) are automatically stripped from filenames and folder names since they identify the contributing regional broadcaster rather than the show.
+
 **Test with just 3 videos per playlist:**
 ```bash
 ./yt-download.sh --jellyfin --max 3 "https://www.youtube.com/@BedtimeHistory"
@@ -211,6 +230,9 @@ A folder with any media file, or anything over 2MB, is left untouched regardless
 | With `-a` | `Video Title.mp3` |
 | ZDF collection | `ZDF Reportagen/Magic Pranks/Episode Title - Magic Pranks [id].mp4` |
 | ZDF movie | `ZDF Filme/Title (year).mp4` |
+| ARD single video | `ARD Film/Episode Title - Show Title [id].mp4` |
+| ARD series (`/serie/`) | `ARD Serie/Show Name/Staffel 1/Episode Title - Show Name [id].mp4` |
+| ARD flat show (`/sendung/`) | `ARD Serie/Show Name/Episode Title - Show Name [id].mp4` |
 
 ### Jellyfin Workflow
 
